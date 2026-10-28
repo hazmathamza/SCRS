@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+data/store.json
+data/*.tmp
+*.muse-github-snapshot-sync.json
