@@ -2,49 +2,48 @@
 
 Custom Discord bot for the **Sunshine Coast Roleplay Server (SCRS)** — a Roblox / SWFL roleplay community.
 
-Built to Vaydin's spec: prefix commands (`-`), gated by the server's real roles (**High Rank**, **Staff Team**, **Civilian**), and wired to the server's real channels (`#startup`, `#early-access`, `#911`, `#ticket-logs`, the **Tickets** category, and more). Administrators bypass role gates so admins can always test.
+**v2:** every command is a **slash (/) command**. Commands are synced to the SCRS guild on startup, so they appear in Discord's `/` picker as soon as you type `/`. Usage is gated by the server's real roles (**High Rank**, **Staff Team**, **Civilian**); Administrators bypass the gates so admins can always test.
 
 ## Commands
 
 | Command | Role needed | What it does |
 |---|---|---|
-| `-say [#channel] <message>` | High Rank | Speak as the bot, in this channel or a chosen one. Your command message is deleted. |
-| `-startup [notes]` | Staff Team | Posts a **Session Startup** embed (with a join button) in `#startup`, pinging Civilian. |
-| `-ea [notes]` | Staff Team | Posts an **Early Access** session embed in `#early-access`, pinging Early Access. |
-| `-release [notes]` | Staff Team | Posts a **Session Released** embed — the session is open to everyone. |
-| `-setup [join info]` | Staff Team | Posts the step-by-step **how to join / set up** embed. |
-| `-infraction @user Reason: … Proof: …` | High Rank | Records an infraction and adds the next **Infraction 1 → 2 → 3** role. DMs the player and logs to HR. Infraction 3 flags escalation. |
-| `-punish @user Reason: … Proof: …` | High Rank | Records a staff strike and applies **Staff Strike 1 → 2 → 3** (replacing the lower strike role). DMs the staff member and logs it. Strike 3 flags a Staff Blacklist review. |
-| `-profile [@user]` | Civilian | Shows profile: avatar, IDs, account + server join dates, registration (Verified / Bloxlink), roles, tickets opened, infractions and strikes. |
-| `-ticket [@user] [reason]` | Civilian | Creates a private `ticket-<name>-<n>` channel under the Tickets category for you (or a mentioned user), visible to staff, with a **Close Ticket** button. Counted on your profile and logged to `#ticket-logs`. |
-| `-911 <location> \| <situation>` | Civilian | Posts a **911 call** in `#911` requesting Sheriff, Police and Fire, pinging Emergency Services. Units can press **Responding** to claim the call. |
-| `-ping` | Anyone | Latency, uptime and server check. |
-| `-help` | Anyone | The full command list, in Discord. |
-| `-close` | Ticket owner / Staff | Closes the ticket channel you're in. |
+| `/say <message> [channel]` | High Rank | Speak as the bot, in this channel or a chosen one. |
+| `/infraction <user> <reason> [proof]` | High Rank | Records an infraction, adds the next **Infraction 1 → 2 → 3** role, DMs the player, logs to **#punishment-logs**. |
+| `/uninfraction <user> [reason]` | High Rank | Removes the player's most recent infraction and fixes their Infraction role (drops back a level, or removes it at zero). Logged to #punishment-logs. |
+| `/punish <user> <reason> [proof]` | High Rank | Staff strike: applies **Staff Strike 1 → 2 → 3**, DMs them, logs to #punishment-logs. Strike 3 flags a Staff Blacklist review. |
+| `/staffpromote <user> <role> [reason]` | High Rank | Gives the member the role and posts a **Promotion** announcement in **#staff-adjustments**. |
+| `/staffdemote <user> <role> [reason]` | High Rank | Removes the role and posts a **Demotion** announcement in **#staff-adjustments**. |
+| `/startup [notes]` | Staff Team | **Session Startup** embed (with join button) in #startup, pinging Civilian. |
+| `/ea [notes]` | Staff Team | **Early Access** session embed in #early-access. |
+| `/release [notes]` | Staff Team | **Session Released** embed in #startup, pinging Civilian. |
+| `/setup [join info]` | Staff Team | Step-by-step how-to-join embed. |
+| `/warrant <user> <reason>` | Staff Team | Puts an **active warrant** on the user (shows on their profile), DMs them, logs to #punishment-logs. |
+| `/ticket <user> <reason> <penal code> <amount>` | Staff Team | Issues a **ticket/citation** to a user: Reason / Penal Code / Amount ($). Stored on their profile, DMs them. *(This is a citation, not a support ticket — the server uses Tickety for support tickets.)* |
+| `/profile [user]` | Civilian | Profile with a **dropdown**: Overview / Tickets / Registered Cars / Warrants, plus registration (Verified/Bloxlink), roles, infractions and strikes. |
+| `/registercar <car name> <color> <plate>` | Civilian | Registers a car to you. Plates are unique server-wide. |
+| `/unregistercar <plate>` | Civilian | Removes your car with that plate. |
+| `/911 <location> <situation>` | Civilian | Posts a **911 call** in #911 requesting Sheriff, Police and Fire, pinging Emergency Services; units can claim it with the **Responding** button. |
+| `/ping`, `/help` | Anyone | Latency/uptime check and the command list. |
 
-Accepted formats for `-infraction` / `-punish`: `Reason: … Proof: …`, or `reason | proof`, or just a reason.
+Infraction/punishment logs go to **#punishment-logs** — never #punishment-request. If that channel doesn't exist, the bot creates it under the Staff category on startup (it needs Manage Channels for that; otherwise create the channel manually).
 
-## Before it works — Developer Portal checklist
+## Developer Portal checklist
 
-In the [Discord Developer Portal](https://discord.com/developers/applications) for this bot:
-
-1. **Bot → Privileged Gateway Intents:** turn ON **Server Members Intent** and **Message Content Intent**.
-2. The bot's role in the server (Discord → Server Settings → Roles) must be **above** the `Infraction 1-3` and `Staff Strike 1-3` roles, or it can't assign them.
-3. Invite / re-invite URL (Administrator is the simplest for setup; scope it down later if you want):
+1. **Bot → Privileged Gateway Intents:** **Server Members Intent** and **Message Content Intent** ON (verified Oct 28, 2026).
+2. The bot's server role must be **above** the `Infraction 1-3` and `Staff Strike 1-3` roles, and above any role used with `/staffpromote` / `/staffdemote`, or Discord will refuse the change.
+3. Slash commands are guild-synced on startup (instant). No re-invite is needed when upgrading from v1 if the bot was invited with the `bot` scope; if `/` commands don't appear after a restart, re-invite once with `scope=bot+applications.commands`:
 
 ```
-https://discord.com/oauth2/authorize?client_id=1564958134886334497&permissions=8&scope=bot
+https://discord.com/oauth2/authorize?client_id=1564958134886334497&permissions=8&scope=bot%20applications.commands
 ```
 
-## Run it on Katabump
+## Updating on Katabump (from v1)
 
-1. In the Katabump panel, create a **Discord bot (Python)** server.
-2. Upload these files (or pull from this repo) so `bot.py` is in the server root.
-3. In **Startup / environment variables**, set:
-   - `DISCORD_TOKEN` = your bot token *(never put this in GitHub or in `bot.py`)*
-   - Startup file / command: `bot.py` (Katabump Python egg runs `python bot.py` — it installs `requirements.txt` automatically)
-4. Press **Start**. Console should print: `Logged in as SCRS#8394` and `Serving guild: Sunshine Coast Roleplay Server`.
-5. Test in **#bot-testing** (Staff category): `-ping`, then each command above.
+1. Panel → **Files**: delete the old `bot.py` (keep your `.env` and `data/store.json` — v2 reads the same data file and adds the new sections automatically).
+2. Upload the new `bot.py` (and `requirements.txt` — unchanged), or upload the zip and extract.
+3. **Restart** the server. Console shows slash commands syncing, then `Logged in as SCRS#8394`.
+4. In Discord, type `/` — the SCRS commands should be listed.
 
 ## Run it locally
 
@@ -57,10 +56,4 @@ python bot.py
 
 ## Data
 
-Tickets, infractions and strikes persist in `data/store.json` (created automatically, git-ignored). Delete it to reset counters.
-
-## Notes / limits
-
-- `-profile` "registration" reflects the server's **Verified** role (granted via Bloxlink in `#verify`) — the bot can't query Bloxlink directly.
-- Buttons (join / responding / close) work while the bot is running; after a restart, buttons on very old messages may need a fresh post.
-- Command names are case-insensitive: `-Infraction`, `-INFRACTION` and `-infraction` all work. The 911 command is typed exactly as `-911`.
+Everything persists in `data/store.json`: infractions, strikes, citations (tickets), registered cars, warrants. Delete it (while the bot is stopped) to reset counters/records.
