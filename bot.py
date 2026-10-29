@@ -283,13 +283,9 @@ async def send_bot_log(
         print(f"[SCRS] bot-log failed: {exc}", file=sys.stderr)
 
 
-class LoggingTree(app_commands.CommandTree):
-    """CommandTree that logs every successfully completed command to #bot-logs."""
-
-    async def on_app_command_completion(
-        self, interaction: discord.Interaction, command: app_commands.Command
-    ) -> None:
-        await send_bot_log(interaction, "✅ Completed")
+# NOTE: command-use logging hooks in via the `on_app_command_completion`
+# BOT EVENT (defined below) — discord.py's CommandTree dispatches that event;
+# there is no CommandTree method to override for it.
 
 
 # --------------------------------------------------------------------------- #
@@ -483,7 +479,7 @@ class SCRSBot(commands.Bot):
             print("[SCRS] Slash commands synced globally")
 
 
-bot = SCRSBot(command_prefix="!", intents=intents, tree_cls=LoggingTree)  # prefix unused; slash only
+bot = SCRSBot(command_prefix="!", intents=intents)  # prefix unused; slash only
 
 
 @bot.event
@@ -495,6 +491,14 @@ async def on_ready() -> None:
     await bot.change_presence(
         activity=discord.Activity(type=discord.ActivityType.watching, name="Sunshine Coast RP | /help")
     )
+
+
+@bot.event
+async def on_app_command_completion(
+    interaction: discord.Interaction, command: app_commands.Command
+) -> None:
+    """Fired by discord.py after every successful slash command — log it to #bot-logs."""
+    await send_bot_log(interaction, "✅ Completed")
 
 
 @bot.tree.error
