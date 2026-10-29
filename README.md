@@ -23,8 +23,11 @@ Custom Discord bot for the **Sunshine Coast Roleplay Server (SCRS)** — a Roblo
 | `/profile [user]` | Civilian | Profile with a **dropdown**: Overview / Tickets / Registered Cars / Warrants, plus registration (Verified/Bloxlink), roles, infractions and strikes. |
 | `/registercar <car name> <color> <plate>` | Civilian | Registers a car to you. Plates are unique server-wide. |
 | `/unregistercar <plate>` | Civilian | Removes your car with that plate. |
+| `/specialrpreq <roleplay> <details> [when]` | Staff Team | Requests a **special roleplay** — the type is picked from a **dropdown** (bank robbery, hostage situation, prison break, etc.; edit `SPECIAL_RP_TYPES` in `bot.py` to change the list). The request posts to **#special-rp-request** pinging **@Management once**, with **Accept / Deny** buttons (Management / High Rank only). The requesting staff member gets a **DM with the result** either way. |
 | `/911 <location> <situation>` | Civilian | Posts a **911 call** in #911 requesting Sheriff, Police and Fire, pinging Emergency Services; units can claim it with the **Responding** button. |
 | `/ping`, `/help` | Anyone | Latency/uptime check and the command list. |
+
+**Command logging:** every slash command used (successful or failed) is logged to **#bot-logs** (channel ID `1565320716130455562`, override with the `BOT_LOGS_CHANNEL_ID` env var) with the user, channel, options and status.
 
 Infraction/punishment logs go to **#punishment-logs** — never #punishment-request. If that channel doesn't exist, the bot creates it under the Staff category on startup (it needs Manage Channels for that; otherwise create the channel manually).
 

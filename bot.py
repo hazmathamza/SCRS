@@ -67,6 +67,25 @@ TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GUILD_ID = int(os.getenv("GUILD_ID", "1515858046822252684"))
 LOG_CHANNEL_NAME = "punishment-logs"
 ADJUSTMENTS_CHANNEL_NAME = "staff-adjustments"
+SPECIAL_RP_CHANNEL_NAME = "special-rp-request"
+BOT_LOGS_CHANNEL_ID = int(os.getenv("BOT_LOGS_CHANNEL_ID", "1565320716130455562"))
+
+# Special roleplay types — chosen from the dropdown in /specialrpreq.
+# Edit this list to change what shows in the dropdown.
+SPECIAL_RP_TYPES = [
+    "Bank Robbery",
+    "Jewelry Store Robbery",
+    "Store Robbery",
+    "Hostage Situation",
+    "High-Speed Pursuit",
+    "Street Race",
+    "Prison Break",
+    "SWAT Raid",
+    "Major Structure Fire",
+    "Major Vehicle Crash / Mass Casualty",
+    "Aircraft Emergency",
+    "Other (explain in details)",
+]
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -109,6 +128,7 @@ STORE_DEFAULTS = {
     "citations": {},     # user_id -> [ {by, reason, penal_code, amount, at} ]
     "cars": {},          # user_id -> [ {car_name, color, plate, at} ]
     "warrants": {},      # user_id -> [ {by, reason, at, active} ]
+    "special_rp_requests": [],  # [ {requester, type, details, status, at, decided_by} ]
     "tickets": {},       # legacy v1 support-ticket counters (kept, unused)
     "ticket_counter": 0,
 }
@@ -211,6 +231,65 @@ async def safe_dm(member: discord.Member, embed: discord.Embed) -> None:
         await member.send(embed=embed)
     except discord.HTTPException:
         pass
+
+
+def _format_options(interaction: discord.Interaction) -> str:
+    """Flatten a slash command's options into 'name: value' lines for logs."""
+    lines: list[str] = []
+
+    def walk(options: list[dict], prefix: str = "") -> None:
+        for opt in options or []:
+            if opt.get("type") in (1, 2):  # subcommand / subcommand group
+                walk(opt.get("options", []), prefix)
+            else:
+                value = opt.get("value", "—")
+                if isinstance(value, str) and len(value) > 120:
+                    value = value[:117] + "…"
+                lines.append(f"{opt.get('name', '?')}: {value}")
+
+    try:
+        walk((interaction.data or {}).get("options", []))
+    except Exception:
+        return ""
+    return "\n".join(lines)
+
+
+async def send_bot_log(
+    interaction: discord.Interaction, status: str, detail: str = ""
+) -> None:
+    """Log a command use to #bot-logs. Never raises — logging must not break commands."""
+    try:
+        if not interaction.guild:
+            return
+        channel = interaction.guild.get_channel(BOT_LOGS_CHANNEL_ID)
+        if channel is None:
+            channel = await interaction.client.fetch_channel(BOT_LOGS_CHANNEL_ID)
+        if channel is None:
+            return
+        command = interaction.command
+        name = f"/{command.qualified_name}" if command else "/unknown"
+        embed = base_embed(f"📝 Command Used — {name}", COLOUR_INFO if status == "✅" else COLOUR_ALERT)
+        embed.add_field(name="Status", value=status, inline=True)
+        embed.add_field(name="User", value=f"{interaction.user.mention} (`{interaction.user}`)", inline=True)
+        if interaction.channel:
+            embed.add_field(name="Channel", value=f"#{getattr(interaction.channel, 'name', 'unknown')}", inline=True)
+        options_text = _format_options(interaction)
+        if options_text:
+            embed.add_field(name="Options", value=options_text[:1024], inline=False)
+        if detail:
+            embed.add_field(name="Detail", value=detail[:1024], inline=False)
+        await channel.send(embed=embed)
+    except Exception as exc:  # logging is best-effort only
+        print(f"[SCRS] bot-log failed: {exc}", file=sys.stderr)
+
+
+class LoggingTree(app_commands.CommandTree):
+    """CommandTree that logs every successfully completed command to #bot-logs."""
+
+    async def on_app_command_completion(
+        self, interaction: discord.Interaction, command: app_commands.Command
+    ) -> None:
+        await send_bot_log(interaction, "✅ Completed")
 
 
 # --------------------------------------------------------------------------- #
@@ -404,7 +483,7 @@ class SCRSBot(commands.Bot):
             print("[SCRS] Slash commands synced globally")
 
 
-bot = SCRSBot(command_prefix="!", intents=intents)  # prefix unused; slash only
+bot = SCRSBot(command_prefix="!", intents=intents, tree_cls=LoggingTree)  # prefix unused; slash only
 
 
 @bot.event
@@ -420,6 +499,7 @@ async def on_ready() -> None:
 
 @bot.tree.error
 async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+    await send_bot_log(interaction, "❌ Failed", detail=f"{type(error).__name__}: {error}"[:300])
     if isinstance(error, app_commands.CheckFailure):
         needed = str(error) or "required"
         embed = base_embed(
@@ -480,7 +560,8 @@ async def help_command(interaction: discord.Interaction) -> None:
             "`/release` — release the session to everyone\n"
             "`/setup` — how to join / set up for the session\n"
             "`/warrant` — put a warrant on a user\n"
-            "`/ticket` — issue a ticket: Reason / Penal Code / Amount"
+            "`/ticket` — issue a ticket: Reason / Penal Code / Amount\n"
+            "`/specialrpreq` — request a special roleplay (dropdown) — Management accepts/denies in #special-rp-request"
         ),
         inline=False,
     )
@@ -895,6 +976,173 @@ async def ticket(
     await interaction.response.send_message(embed=embed)
     await log_punishment(interaction.guild, embed)
     await safe_dm(user, embed)
+
+
+# --------------------------------------------------------------------------- #
+# Staff Team — special roleplay requests
+# --------------------------------------------------------------------------- #
+
+
+class SpecialRPView(discord.ui.View):
+    """Accept / Deny buttons on a special RP request (Management only)."""
+
+    def __init__(self, requester_id: int) -> None:
+        super().__init__(timeout=None)
+        self.requester_id = requester_id
+        self.decided = False
+
+    async def _decide(self, interaction: discord.Interaction, accepted: bool) -> None:
+        member = interaction.user
+        allowed = isinstance(member, discord.Member) and (
+            member.guild_permissions.administrator
+            or has_any_role(member, {"Management"} | HIGH_RANK_ROLES)
+        )
+        if not allowed:
+            await interaction.response.send_message(
+                "Only **Management** (or High Rank) can accept or deny special RP requests.",
+                ephemeral=True,
+            )
+            return
+        if self.decided:
+            await interaction.response.send_message("This request was already decided.", ephemeral=True)
+            return
+        self.decided = True
+
+        for child in self.children:
+            child.disabled = True
+
+        embed = interaction.message.embeds[0] if interaction.message.embeds else base_embed("Special RP Request", COLOUR_MAIN)
+        embed.colour = COLOUR_OK if accepted else COLOUR_ALERT
+        status_text = "✅ ACCEPTED" if accepted else "❌ DENIED"
+        # Replace any existing Status field, then set the new one.
+        for i, field in enumerate(embed.fields):
+            if field.name == "Status":
+                embed.remove_field(i)
+                break
+        embed.add_field(name="Status", value=f"{status_text} by {interaction.user.mention}", inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        # Record the decision.
+        for record in store["special_rp_requests"]:
+            if record.get("requester") == self.requester_id and record.get("status") == "pending":
+                record["status"] = "accepted" if accepted else "denied"
+                record["decided_by"] = interaction.user.id
+                break
+        save_store(store)
+
+        # DM the requesting staff member the result.
+        guild = interaction.guild
+        requester = guild.get_member(self.requester_id) if guild else None
+        rp_type = next(
+            (f.value for f in embed.fields if f.name == "Special Roleplay"),
+            "your special roleplay",
+        )
+        if requester:
+            dm = base_embed(
+                f"{status_text.split()[0]} Special RP Request {status_text.split()[-1]}",
+                COLOUR_OK if accepted else COLOUR_ALERT,
+            )
+            dm.add_field(name="Special Roleplay", value=rp_type, inline=False)
+            dm.add_field(name="Decision by", value=interaction.user.mention, inline=False)
+            dm.description = (
+                "Your special roleplay request was **accepted** — you're clear to run it. 🎬"
+                if accepted
+                else "Your special roleplay request was **denied** by management this time."
+            )
+            await safe_dm(requester, dm)
+
+
+    @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.success, custom_id="scrs_rp_accept")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._decide(interaction, True)
+
+    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id="scrs_rp_deny")
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._decide(interaction, False)
+
+
+async def get_special_rp_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    channel = find_channel(guild, SPECIAL_RP_CHANNEL_NAME)
+    if channel:
+        return channel
+    category = None
+    for cat in guild.categories:
+        if "staff" in cat.name.lower():
+            category = cat
+            break
+    try:
+        return await guild.create_text_channel(
+            name=SPECIAL_RP_CHANNEL_NAME,
+            category=category,
+            topic="Special roleplay requests for SCRS (posted by the SCRS bot)",
+            reason="SCRS bot: special-rp-request channel required by spec",
+        )
+    except discord.HTTPException:
+        return None
+
+
+@bot.tree.command(name="specialrpreq", description="Request a special roleplay — pick the type from the dropdown")
+@staff_only()
+@app_commands.describe(
+    roleplay="Which special roleplay? (pick from the dropdown)",
+    details="Describe the roleplay you want to run",
+    when="When do you want to run it? (optional)",
+)
+@app_commands.choices(
+    roleplay=[app_commands.Choice(name=t, value=t) for t in SPECIAL_RP_TYPES]
+)
+async def specialrpreq(
+    interaction: discord.Interaction,
+    roleplay: app_commands.Choice[str],
+    details: str,
+    when: str = "",
+) -> None:
+    guild = interaction.guild
+    target = await get_special_rp_channel(guild)
+    if target is None:
+        await interaction.response.send_message(
+            embed=base_embed(
+                "❌ No request channel",
+                COLOUR_ALERT,
+                f"Couldn't find or create #{SPECIAL_RP_CHANNEL_NAME} — a server admin may need to create it.",
+            ),
+            ephemeral=True,
+        )
+        return
+
+    embed = base_embed("🎬 Special Roleplay Request", COLOUR_EA)
+    embed.add_field(name="Special Roleplay", value=roleplay.value, inline=False)
+    embed.add_field(name="Requested by", value=f"{interaction.user.mention} ({interaction.user.display_name})", inline=False)
+    embed.add_field(name="Details", value=details, inline=False)
+    if when:
+        embed.add_field(name="When", value=when, inline=False)
+    embed.add_field(name="Status", value="⏳ Pending — Management, use the buttons below.", inline=False)
+
+    management = find_role(guild, "Management")
+    # Ping Management exactly once, in the message content.
+    message = await target.send(
+        content=management.mention if management else None,
+        embed=embed,
+        view=SpecialRPView(interaction.user.id),
+    )
+
+    store["special_rp_requests"].append(
+        {
+            "requester": interaction.user.id,
+            "type": roleplay.value,
+            "details": details,
+            "when": when,
+            "status": "pending",
+            "message_id": message.id,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    save_store(store)
+    await interaction.response.send_message(
+        f"✅ Your **{roleplay.value}** request was sent to {target.mention} — Management has been pinged. "
+        "You'll get a DM when they accept or deny it.",
+        ephemeral=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
