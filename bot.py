@@ -94,6 +94,8 @@ DATA_FILE = DATA_DIR / "store.json"
 HIGH_RANK_ROLES = {
     "Owner",
     "Co Owner",
+    "Founders",
+    "Bot Maker",
     "High Rank",
     "Management",
     "Staff Manager",
@@ -1371,14 +1373,40 @@ async def unregistercar(interaction: discord.Interaction, plate: str) -> None:
     await interaction.response.send_message(embed=embed)
 
 
-# Candidate role names for each emergency service (Vaydin is creating the
-# dedicated roles; the bot tries each name in order, then Emergency Services).
+# Emergency-service roles, hooked up to the roles Vaydin created in SCRS
+# (checked in Server Settings on Oct 30, 2026):
+#   Police  -> "Sarasota Police Department"
+#   Sheriff -> "Sarasota County"  (the county role — Sarasota County Sheriff)
+#   Fire    -> "Sarasota Fire Department"
+# The bot tries the exact names first, then falls back to a partial-name
+# match ("police" / "sheriff" / "county" / "fire" anywhere in a role name),
+# then to the generic names, so renames don't break 911 pings.
 SERVICE_ROLE_CANDIDATES = {
-    "police": ["Police", "Police Department", "PD"],
-    "sheriff": ["Sheriff", "Sheriff's Office", "Sheriff Department", "Sheriff Office"],
-    "fire": ["Fire Department", "Fire", "Fire Dept", "Fire/EMS", "FD", "EMS"],
+    "police": ["Sarasota Police Department", "Police", "Police Department", "PD"],
+    "sheriff": [
+        "Sarasota County",
+        "Sarasota County Sheriff",
+        "Sarasota County Sheriff's Office",
+        "Sheriff",
+        "Sheriff's Office",
+        "Sheriff Department",
+        "Sheriff Office",
+    ],
+    "fire": ["Sarasota Fire Department", "Fire Department", "Fire", "Fire Dept", "Fire/EMS", "FD", "EMS"],
 }
 SERVICE_LABELS = {"police": "🚓 Police", "sheriff": "⭐ Sheriff", "fire": "🚒 Fire Department"}
+_SERVICE_FUZZY = {"police": ("police",), "sheriff": ("sheriff", "county"), "fire": ("fire",)}
+
+
+def find_service_role(guild: discord.Guild, key: str) -> discord.Role | None:
+    role = find_role(guild, *SERVICE_ROLE_CANDIDATES[key])
+    if role:
+        return role
+    for candidate in guild.roles:
+        lname = candidate.name.lower()
+        if any(needle in lname for needle in _SERVICE_FUZZY[key]):
+            return candidate
+    return None
 
 
 @bot.tree.command(name="911", description="Make a 911 call — choose Police, Sheriff or Fire")
@@ -1410,7 +1438,7 @@ async def nine_one_one(
     ping_roles: list[discord.Role] = []
     missing: list[str] = []
     for key in chosen:
-        role = find_role(guild, *SERVICE_ROLE_CANDIDATES[key])
+        role = find_service_role(guild, key)
         if role:
             ping_roles.append(role)
         else:
