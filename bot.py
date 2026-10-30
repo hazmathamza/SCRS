@@ -314,9 +314,14 @@ civilian_only = lambda: check_group(CIVILIAN_ROLES, "Civilian")
 
 
 class SessionView(discord.ui.View):
-    def __init__(self) -> None:
+    def __init__(self, link: str = "") -> None:
         super().__init__(timeout=None)
         self.attendees: set[int] = set()
+        if link:
+            # URL button — clicking it opens the host's session join link.
+            self.add_item(
+                discord.ui.Button(label="🎮 Join Session", style=discord.ButtonStyle.link, url=link)
+            )
 
     @discord.ui.button(label="✅ I'm joining", style=discord.ButtonStyle.success, custom_id="scrs_session_join")
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -552,6 +557,7 @@ async def help_command(interaction: discord.Interaction) -> None:
             "`/say` — speak as the bot\n"
             "`/infraction` / `/uninfraction` — give / remove a player infraction (Infraction 1–3)\n"
             "`/punish` — staff strike (Staff Strike 1–3)\n"
+            "`/staffappeal` — remove a staff strike after a successful appeal\n"
             "`/staffpromote` / `/staffdemote` — give / remove a staff role (announced in #staff-adjustments)"
         ),
         inline=False,
@@ -563,6 +569,7 @@ async def help_command(interaction: discord.Interaction) -> None:
             "`/ea` — Early Access session in #early-access\n"
             "`/release` — release the session to everyone\n"
             "`/setup` — how to join / set up for the session\n"
+            "`/sessionend` — end the session + clean up the session channels\n"
             "`/warrant` — put a warrant on a user\n"
             "`/ticket` — issue a ticket: Reason / Penal Code / Amount\n"
             "`/specialrpreq` — request a special roleplay (dropdown) — Management accepts/denies in #special-rp-request"
@@ -575,7 +582,7 @@ async def help_command(interaction: discord.Interaction) -> None:
             "`/profile` — profile with dropdown: Tickets / Registered Cars / Warrants\n"
             "`/registercar` — register a car (Car Name / Color / Plate)\n"
             "`/unregistercar` — remove your car by plate\n"
-            "`/911` — call Sheriff / Police / Fire"
+            "`/911` — call Police, Sheriff or Fire (you choose — it pings their role)"
         ),
         inline=False,
     )
@@ -747,6 +754,56 @@ async def punish(
     await safe_dm(user, embed)
 
 
+@bot.tree.command(name="staffappeal", description="Remove a staff strike after a successful appeal")
+@high_rank_only()
+@app_commands.describe(user="Staff member whose strike was appealed", reason="Appeal outcome / reason for removal")
+async def staffappeal(
+    interaction: discord.Interaction, user: discord.Member, reason: str = "Appeal accepted"
+) -> None:
+    records = store["strikes"].get(str(user.id), [])
+    if not records:
+        await interaction.response.send_message(
+            embed=base_embed("ℹ️ Nothing to remove", COLOUR_INFO, f"{user.mention} has no staff strikes on record."),
+            ephemeral=True,
+        )
+        return
+
+    removed = records.pop()
+    store["strikes"][str(user.id)] = records
+    save_store(store)
+    old_level = int(removed.get("level", len(records) + 1))
+    new_level = len(records)
+
+    notes = []
+    guild = interaction.guild
+    old_role = find_role(guild, f"Staff Strike {old_level}")
+    if old_role and old_role in user.roles:
+        try:
+            await user.remove_roles(old_role, reason=f"Strike appealed by {interaction.user}: {reason}")
+            notes.append(f"Removed role: **Staff Strike {old_level}**")
+        except discord.Forbidden:
+            notes.append(f"⚠️ Couldn't remove **Staff Strike {old_level}** (bot role too low).")
+    if new_level > 0:
+        lower_role = find_role(guild, f"Staff Strike {new_level}")
+        if lower_role and lower_role not in user.roles:
+            try:
+                await user.add_roles(lower_role, reason="Strike level lowered after appeal")
+                notes.append(f"Now at: **Staff Strike {new_level}**")
+            except discord.Forbidden:
+                pass
+
+    embed = base_embed("✅ Staff Strike Removed (Appeal)", COLOUR_OK)
+    embed.add_field(name="Staff Member", value=f"{user.mention} ({user.display_name})", inline=False)
+    embed.add_field(name="Strikes remaining", value=str(new_level), inline=True)
+    embed.add_field(name="Appeal handled by", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    if notes:
+        embed.add_field(name="Roles", value="\n".join(notes), inline=False)
+    await interaction.response.send_message(embed=embed)
+    await log_punishment(guild, embed)
+    await safe_dm(user, embed)
+
+
 # --------------------------------------------------------------------------- #
 # Staff promotions / demotions — announced in #staff-adjustments
 # --------------------------------------------------------------------------- #
@@ -830,8 +887,16 @@ async def staffdemote(
 # --------------------------------------------------------------------------- #
 
 
+def _valid_link(link: str) -> bool:
+    return not link or link.startswith(("http://", "https://"))
+
+
 async def _post_session(
-    interaction: discord.Interaction, target_names: list[str], embed: discord.Embed, ping_role_names: list[str]
+    interaction: discord.Interaction,
+    target_names: list[str],
+    embed: discord.Embed,
+    ping_role_names: list[str],
+    link: str = "",
 ) -> None:
     target = find_channel(interaction.guild, *target_names) or interaction.channel
     ping = ""
@@ -840,14 +905,19 @@ async def _post_session(
         if role:
             ping = role.mention
             break
-    await target.send(content=ping or None, embed=embed, view=SessionView())
+    await target.send(content=ping or None, embed=embed, view=SessionView(link))
     await interaction.response.send_message(f"✅ Posted in {target.mention}", ephemeral=True)
 
 
 @bot.tree.command(name="startup", description="Announce a session startup in #startup")
 @staff_only()
-@app_commands.describe(notes="Details / join info for the session")
-async def startup(interaction: discord.Interaction, notes: str = "") -> None:
+@app_commands.describe(notes="Details / join info for the session", link="Session join link (e.g. Roblox private server link) — adds a Join Session button")
+async def startup(interaction: discord.Interaction, notes: str = "", link: str = "") -> None:
+    if not _valid_link(link):
+        await interaction.response.send_message(
+            "That link doesn't look right — links must start with `https://`.", ephemeral=True
+        )
+        return
     embed = base_embed(
         "🟢 Session Startup — SCRS",
         COLOUR_OK,
@@ -859,16 +929,25 @@ async def startup(interaction: discord.Interaction, notes: str = "") -> None:
         embed.add_field(name="Details / Join Info", value=notes, inline=False)
     embed.add_field(
         name="How to join",
-        value="Check #information for the join steps, be in uniform / correct vehicle class, and click **I'm joining** below.",
+        value=(
+            "Click **🎮 Join Session** below to join, and check #information for the session steps."
+            if link
+            else "Check #information for the join steps, be in uniform / correct vehicle class, and click **I'm joining** below."
+        ),
         inline=False,
     )
-    await _post_session(interaction, ["startup"], embed, ["Civilian", "Verified"])
+    await _post_session(interaction, ["startup"], embed, ["Civilian", "Verified"], link=link)
 
 
 @bot.tree.command(name="ea", description="Announce an Early Access session in #early-access")
 @staff_only()
-@app_commands.describe(notes="Details / join info for the session")
-async def ea(interaction: discord.Interaction, notes: str = "") -> None:
+@app_commands.describe(notes="Details / join info for the session", link="Session join link — adds a Join Session button")
+async def ea(interaction: discord.Interaction, notes: str = "", link: str = "") -> None:
+    if not _valid_link(link):
+        await interaction.response.send_message(
+            "That link doesn't look right — links must start with `https://`.", ephemeral=True
+        )
+        return
     embed = base_embed(
         "🟣 Early Access Session — SCRS",
         COLOUR_EA,
@@ -879,13 +958,18 @@ async def ea(interaction: discord.Interaction, notes: str = "") -> None:
     if notes:
         embed.add_field(name="Details / Join Info", value=notes, inline=False)
     embed.add_field(name="Next step", value="When the session opens to everyone, staff will run `/release`.", inline=False)
-    await _post_session(interaction, ["early-access"], embed, ["Early Access", "Civilian"])
+    await _post_session(interaction, ["early-access"], embed, ["Early Access", "Civilian"], link=link)
 
 
 @bot.tree.command(name="release", description="Release the session to the public")
 @staff_only()
-@app_commands.describe(notes="Details / join info for the session")
-async def release(interaction: discord.Interaction, notes: str = "") -> None:
+@app_commands.describe(notes="Details / join info for the session", link="Session join link — adds a Join Session button")
+async def release(interaction: discord.Interaction, notes: str = "", link: str = "") -> None:
+    if not _valid_link(link):
+        await interaction.response.send_message(
+            "That link doesn't look right — links must start with `https://`.", ephemeral=True
+        )
+        return
     embed = base_embed(
         "🔓 Session Released — Open to Everyone",
         COLOUR_INFO,
@@ -895,7 +979,7 @@ async def release(interaction: discord.Interaction, notes: str = "") -> None:
     embed.add_field(name="Status", value="🔓 Public", inline=True)
     if notes:
         embed.add_field(name="Details / Join Info", value=notes, inline=False)
-    await _post_session(interaction, ["startup"], embed, ["Civilian", "Verified"])
+    await _post_session(interaction, ["startup"], embed, ["Civilian", "Verified"], link=link)
 
 
 @bot.tree.command(name="setup", description="Post the session setup / how-to-join embed")
@@ -980,6 +1064,66 @@ async def ticket(
     await interaction.response.send_message(embed=embed)
     await log_punishment(interaction.guild, embed)
     await safe_dm(user, embed)
+
+
+async def _purge_bot_session_messages(channel: discord.TextChannel, keep_first_overall: bool = False) -> int:
+    """Delete the SCRS bot's own session messages in a channel. Returns the count."""
+    keep_id = None
+    if keep_first_overall:
+        async for msg in channel.history(limit=1, oldest_first=True):
+            keep_id = msg.id
+    deleted = 0
+    async for msg in channel.history(limit=250):
+        if bot.user is None or msg.author.id != bot.user.id:
+            continue
+        if msg.pinned or (keep_id is not None and msg.id == keep_id):
+            continue
+        try:
+            await msg.delete()
+            deleted += 1
+        except discord.HTTPException:
+            pass
+    return deleted
+
+
+@bot.tree.command(name="sessionend", description="End the session: post the ended announcement and clean up session channels")
+@staff_only()
+@app_commands.describe(
+    notes="Any closing notes for the session-ended post",
+    cleanup="Also delete the bot's session posts in #startup / #early-access / #911 (keeps the first-ever #startup message)",
+)
+async def sessionend(interaction: discord.Interaction, notes: str = "", cleanup: bool = True) -> None:
+    guild = interaction.guild
+    await interaction.response.defer(ephemeral=True)
+
+    results: dict[str, int] = {}
+    if cleanup:
+        for name, keep_first in (("startup", True), ("early-access", False), ("911", False)):
+            channel = find_channel(guild, name)
+            if channel:
+                results[name] = await _purge_bot_session_messages(channel, keep_first_overall=keep_first)
+
+    embed = base_embed(
+        "🔴 Session Ended — SCRS",
+        COLOUR_ALERT,
+        "This roleplay session is **over**. Thanks to everyone who joined — see you at the next startup!",
+    )
+    embed.add_field(name="Ended by", value=interaction.user.mention, inline=True)
+    embed.add_field(name="Status", value="🔴 Ended", inline=True)
+    if notes:
+        embed.add_field(name="Notes", value=notes, inline=False)
+    target = find_channel(guild, "startup") or interaction.channel
+    await target.send(embed=embed)
+
+    if cleanup:
+        summary = ", ".join(f"#{name}: {count} deleted" for name, count in results.items()) or "nothing to clean"
+        await interaction.followup.send(
+            f"🔴 Session ended and posted in {target.mention}. Cleanup — {summary}. "
+            "The first-ever message in #startup was kept.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.followup.send(f"🔴 Session ended and posted in {target.mention}.", ephemeral=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1227,22 +1371,76 @@ async def unregistercar(interaction: discord.Interaction, plate: str) -> None:
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="911", description="Make a 911 call to Sheriff / Police / Fire Department")
+# Candidate role names for each emergency service (Vaydin is creating the
+# dedicated roles; the bot tries each name in order, then Emergency Services).
+SERVICE_ROLE_CANDIDATES = {
+    "police": ["Police", "Police Department", "PD"],
+    "sheriff": ["Sheriff", "Sheriff's Office", "Sheriff Department", "Sheriff Office"],
+    "fire": ["Fire Department", "Fire", "Fire Dept", "Fire/EMS", "FD", "EMS"],
+}
+SERVICE_LABELS = {"police": "🚓 Police", "sheriff": "⭐ Sheriff", "fire": "🚒 Fire Department"}
+
+
+@bot.tree.command(name="911", description="Make a 911 call — choose Police, Sheriff or Fire")
 @civilian_only()
-@app_commands.describe(location="Where is the emergency?", situation="What's happening?")
-async def nine_one_one(interaction: discord.Interaction, location: str, situation: str) -> None:
+@app_commands.describe(
+    service="Who are you calling?",
+    location="Where is the emergency?",
+    situation="What's happening?",
+)
+@app_commands.choices(
+    service=[
+        app_commands.Choice(name="🚓 Police", value="police"),
+        app_commands.Choice(name="⭐ Sheriff", value="sheriff"),
+        app_commands.Choice(name="🚒 Fire Department", value="fire"),
+        app_commands.Choice(name="🚨 All Services", value="all"),
+    ]
+)
+async def nine_one_one(
+    interaction: discord.Interaction,
+    service: app_commands.Choice[str],
+    location: str,
+    situation: str,
+) -> None:
+    guild = interaction.guild
+    chosen = (
+        ["police", "sheriff", "fire"] if service.value == "all" else [service.value]
+    )
+
+    ping_roles: list[discord.Role] = []
+    missing: list[str] = []
+    for key in chosen:
+        role = find_role(guild, *SERVICE_ROLE_CANDIDATES[key])
+        if role:
+            ping_roles.append(role)
+        else:
+            missing.append(SERVICE_LABELS[key])
+    fallback_note = ""
+    if not ping_roles:
+        fallback = find_role(guild, "Emergency Services")
+        if fallback:
+            ping_roles.append(fallback)
+            fallback_note = " (their dedicated role wasn't found yet, so Emergency Services was pinged)"
+    elif missing:
+        fallback_note = f" (no role found yet for: {', '.join(missing)})"
+
     embed = base_embed("🚨 911 CALL — Emergency Services Needed", COLOUR_ALERT)
     embed.add_field(name="Caller", value=f"{interaction.user.mention} ({interaction.user.display_name})", inline=False)
     embed.add_field(name="Location", value=location, inline=False)
     embed.add_field(name="Situation", value=situation, inline=False)
-    embed.add_field(name="Services Requested", value="⭐ Sheriff • 🚓 Police • 🚒 Fire Department", inline=False)
+    embed.add_field(
+        name="Service Requested",
+        value=" • ".join(SERVICE_LABELS[k] for k in chosen) + fallback_note,
+        inline=False,
+    )
     embed.add_field(name="Status", value="⏳ Awaiting a unit — press **Responding** below if you're en route.", inline=False)
 
-    target = find_channel(interaction.guild, "911") or interaction.channel
-    ping_role = find_role(interaction.guild, "Emergency Services")
-    await target.send(content=ping_role.mention if ping_role else None, embed=embed, view=NineOneOneView())
+    target = find_channel(guild, "911") or interaction.channel
+    content = " ".join(role.mention for role in ping_roles) or None
+    await target.send(content=content, embed=embed, view=NineOneOneView())
     await interaction.response.send_message(
-        f"🚨 Your 911 call was sent to {target.mention} — help is on the way.", ephemeral=True
+        f"🚨 Your 911 call for **{' / '.join(SERVICE_LABELS[k] for k in chosen)}** was sent to {target.mention} — help is on the way.",
+        ephemeral=True,
     )
 
 

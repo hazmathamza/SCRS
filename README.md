@@ -11,10 +11,12 @@ Custom Discord bot for the **Sunshine Coast Roleplay Server (SCRS)** — a Roblo
 | `/say <message> [channel]` | High Rank | Speak as the bot, in this channel or a chosen one. |
 | `/infraction <user> <reason> [proof]` | High Rank | Records an infraction, adds the next **Infraction 1 → 2 → 3** role, DMs the player, logs to **#punishment-logs**. |
 | `/uninfraction <user> [reason]` | High Rank | Removes the player's most recent infraction and fixes their Infraction role (drops back a level, or removes it at zero). Logged to #punishment-logs. |
+| `/staffappeal <user> [reason]` | High Rank | Removes the staff member's most recent strike after a successful appeal, fixing their Staff Strike role level. Logged to #punishment-logs and DM'd. |
 | `/punish <user> <reason> [proof]` | High Rank | Staff strike: applies **Staff Strike 1 → 2 → 3**, DMs them, logs to #punishment-logs. Strike 3 flags a Staff Blacklist review. |
 | `/staffpromote <user> <role> [reason]` | High Rank | Gives the member the role and posts a **Promotion** announcement in **#staff-adjustments**. |
 | `/staffdemote <user> <role> [reason]` | High Rank | Removes the role and posts a **Demotion** announcement in **#staff-adjustments**. |
-| `/startup [notes]` | Staff Team | **Session Startup** embed (with join button) in #startup, pinging Civilian. |
+| `/startup [notes] [link]` | Staff Team | **Session Startup** embed in #startup, pinging Civilian. The host can pass a **join link** — the embed then has a **🎮 Join Session** link button (also on `/ea` and `/release`). |
+| `/sessionend [notes] [cleanup]` | Staff Team | Posts a **🔴 Session Ended** embed in #startup and (unless cleanup is turned off) deletes the bot's session posts in #startup / #early-access / #911 — always keeping the **first-ever message in #startup**. |
 | `/ea [notes]` | Staff Team | **Early Access** session embed in #early-access. |
 | `/release [notes]` | Staff Team | **Session Released** embed in #startup, pinging Civilian. |
 | `/setup [join info]` | Staff Team | Step-by-step how-to-join embed. |
@@ -24,7 +26,7 @@ Custom Discord bot for the **Sunshine Coast Roleplay Server (SCRS)** — a Roblo
 | `/registercar <car name> <color> <plate>` | Civilian | Registers a car to you. Plates are unique server-wide. |
 | `/unregistercar <plate>` | Civilian | Removes your car with that plate. |
 | `/specialrpreq <roleplay> <details> [when]` | Staff Team | Requests a **special roleplay** — the type is picked from a **dropdown** (bank robbery, hostage situation, prison break, etc.; edit `SPECIAL_RP_TYPES` in `bot.py` to change the list). The request posts to **#special-rp-request** pinging **@Management once**, with **Accept / Deny** buttons (Management / High Rank only). The requesting staff member gets a **DM with the result** either way. |
-| `/911 <location> <situation>` | Civilian | Posts a **911 call** in #911 requesting Sheriff, Police and Fire, pinging Emergency Services; units can claim it with the **Responding** button. |
+| `/911 <service> <location> <situation>` | Civilian | Posts a **911 call** in #911. The caller **chooses the service — Police, Sheriff, Fire Department, or All** — and the bot **pings that service's role** (it looks for roles named Police / Police Department, Sheriff / Sheriff's Office, Fire Department / Fire, etc.; if a dedicated role doesn't exist yet it falls back to Emergency Services and says so). Units can claim the call with the **Responding** button. |
 | `/ping`, `/help` | Anyone | Latency/uptime check and the command list. |
 
 **Command logging:** every slash command used (successful or failed) is logged to **#bot-logs** (channel ID `1565320716130455562`, override with the `BOT_LOGS_CHANNEL_ID` env var) with the user, channel, options and status.
