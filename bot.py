@@ -669,7 +669,16 @@ async def help_command(interaction: discord.Interaction) -> None:
         ),
         inline=False,
     )
-    embed.add_field(name="⚙️ Utility", value="`/ping` — check the bot", inline=False)
+    embed.add_field(
+        name="🎙️ Voice (High Rank)",
+        value=(
+            "`/voicejoin` — bot joins your voice channel (or RTO): speak commands, it confirms out loud before acting\n"
+            "`/voiceleave` — stop the voice assistant\n"
+            "While active, 911 calls are read aloud in the channel (dispatch)."
+        ),
+        inline=False,
+    )
+    embed.add_field(name="⚙️ Utility", value="`/ping` — check the bot • `/sysinfo` — host diagnostics [High Rank]", inline=False)
     await interaction.response.send_message(embed=embed)
 
 
@@ -1820,6 +1829,648 @@ async def nine_one_one(
         f"🚨 Your 911 call for **{' / '.join(SERVICE_LABELS[k] for k in chosen)}** was sent to {target.mention} — help is on the way.",
         ephemeral=True,
     )
+    # Voice dispatch: if a voice session is live, read the call out in RTO.
+    _session = VOICE_SESSIONS.get(guild.id)
+    if _session:
+        _labels = " and ".join(SERVICE_LABELS[k].split(" ", 1)[-1] for k in chosen)
+        asyncio.create_task(
+            _speak(
+                _session,
+                f"911 call. {_labels} requested. Location: {location}. Situation: {situation}.",
+            )
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Voice assistant (Groq) — /voicejoin + /voiceleave
+#
+# The bot joins a voice channel (RTO by default), listens to High Rank
+# speakers, transcribes with Groq Whisper, parses commands with a Groq LLM
+# (tool calling), asks for spoken confirmation before anything destructive,
+# executes, and answers out loud with Groq Orpheus TTS. 911 calls are also
+# read aloud while a voice session is active. Needs GROQ_API_KEY in .env
+# plus the discord-ext-voice-recv package; without them the rest of the bot
+# works normally and only the voice commands report what's missing.
+# --------------------------------------------------------------------------- #
+
+import asyncio
+import io
+import wave
+
+try:
+    import aiohttp
+except ImportError:  # discord.py already depends on aiohttp; this is belt & braces
+    aiohttp = None
+
+try:
+    from discord.ext import voice_recv
+
+    VOICE_RECV_AVAILABLE = True
+except Exception:
+    voice_recv = None
+    VOICE_RECV_AVAILABLE = False
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_BASE = "https://api.groq.com/openai/v1"
+GROQ_LLM_MODEL = os.getenv("GROQ_LLM_MODEL", "openai/gpt-oss-120b")
+GROQ_STT_MODEL = os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo")
+GROQ_TTS_MODEL = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english")
+GROQ_TTS_VOICE = os.getenv("GROQ_TTS_VOICE", "autumn")
+
+VOICE_SESSIONS: dict[int, dict] = {}
+CONFIRM_WORDS = {"confirm", "confirmed", "yes", "yeah", "yep", "do it", "go ahead", "proceed", "affirmative"}
+CANCEL_WORDS = {"cancel", "no", "stop", "never mind", "nevermind", "abort", "forget it"}
+
+
+def _groq_headers() -> dict:
+    return {"Authorization": f"Bearer {GROQ_API_KEY}"}
+
+
+async def groq_transcribe(wav_bytes: bytes) -> str:
+    """Speech -> text via Groq Whisper."""
+    if aiohttp is None:
+        return ""
+    form = aiohttp.FormData()
+    form.add_field("file", wav_bytes, filename="utterance.wav", content_type="audio/wav")
+    form.add_field("model", GROQ_STT_MODEL)
+    form.add_field("response_format", "json")
+    async with aiohttp.ClientSession() as http:
+        async with http.post(
+            f"{GROQ_BASE}/audio/transcriptions",
+            headers=_groq_headers(),
+            data=form,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[SCRS] Groq STT error {resp.status}: {(await resp.text())[:200]}", file=sys.stderr)
+                return ""
+            data = await resp.json()
+    return str(data.get("text", "")).strip()
+
+
+VOICE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "give_infraction",
+            "description": "Give a player an infraction (discipline record + Infraction role). Use when the speaker asks to infract/infraction a player.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "member": {"type": "string", "description": "The player's name exactly as spoken"},
+                    "reason": {"type": "string", "description": "Why they are being infracted"},
+                },
+                "required": ["member", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "give_strike",
+            "description": "Give a staff member a strike (punish). Use when the speaker asks to strike/punish a staff member.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "member": {"type": "string", "description": "The staff member's name exactly as spoken"},
+                    "reason": {"type": "string", "description": "Why they are receiving the strike"},
+                },
+                "required": ["member", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "issue_ticket",
+            "description": "Issue a citation/ticket with a fine amount to a user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "member": {"type": "string", "description": "The user's name exactly as spoken"},
+                    "reason": {"type": "string", "description": "Reason for the ticket"},
+                    "penal_code": {"type": "string", "description": "Penal code, if mentioned; otherwise 'N/A'"},
+                    "amount": {"type": "integer", "description": "Fine amount in dollars"},
+                },
+                "required": ["member", "reason", "amount"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "issue_warrant",
+            "description": "Put an arrest warrant on a user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "member": {"type": "string", "description": "The user's name exactly as spoken"},
+                    "reason": {"type": "string", "description": "Reason for the warrant"},
+                },
+                "required": ["member", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "say_message",
+            "description": "Make the bot post a text message in the staff text channel. Use when the speaker asks the bot to say/write/announce something in text.",
+            "parameters": {
+                "type": "object",
+                "properties": {"message": {"type": "string", "description": "The exact message to post"}},
+                "required": ["message"],
+            },
+        },
+    },
+]
+
+VOICE_SYSTEM_PROMPT = (
+    "You are the voice command parser for the SCRS roleplay staff bot. A staff member is speaking in a "
+    "voice channel. If — and only if — their utterance is a clear request to perform one of the available "
+    "actions, call the matching function with the arguments taken from what they said. Names must be copied "
+    "exactly as spoken. If the utterance is ordinary conversation, a question, or not a clear command, do "
+    "NOT call any function and return an empty reply. Never invent a member name, reason, or amount that "
+    "was not said."
+)
+
+
+async def groq_parse_command(transcript: str) -> dict | None:
+    """Text -> {name, arguments} tool call, or None if it isn't a command."""
+    if aiohttp is None:
+        return None
+    payload = {
+        "model": GROQ_LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": VOICE_SYSTEM_PROMPT},
+            {"role": "user", "content": transcript},
+        ],
+        "tools": VOICE_TOOLS,
+        "tool_choice": "auto",
+        "temperature": 0,
+    }
+    async with aiohttp.ClientSession() as http:
+        async with http.post(
+            f"{GROQ_BASE}/chat/completions",
+            headers={**_groq_headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[SCRS] Groq LLM error {resp.status}: {(await resp.text())[:200]}", file=sys.stderr)
+                return None
+            data = await resp.json()
+    try:
+        calls = data["choices"][0]["message"].get("tool_calls") or []
+        if not calls:
+            return None
+        fn = calls[0]["function"]
+        return {"name": fn["name"], "arguments": json.loads(fn.get("arguments") or "{}")}
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        return None
+
+
+async def groq_speak_wav(text: str) -> bytes | None:
+    """Text -> WAV audio bytes via Groq Orpheus TTS (max 200 chars per request)."""
+    if aiohttp is None:
+        return None
+    payload = {
+        "model": GROQ_TTS_MODEL,
+        "voice": GROQ_TTS_VOICE,
+        "input": text[:200],
+        "response_format": "wav",
+    }
+    async with aiohttp.ClientSession() as http:
+        async with http.post(
+            f"{GROQ_BASE}/audio/speech",
+            headers={**_groq_headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[SCRS] Groq TTS error {resp.status}: {(await resp.text())[:200]}", file=sys.stderr)
+                return None
+            return await resp.read()
+
+
+def _chunk_text(text: str, limit: int = 190) -> list[str]:
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return [text] if text else []
+    chunks, current = [], ""
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        for piece in ([sentence] if len(sentence) <= limit else [sentence[i : i + limit] for i in range(0, len(sentence), limit)]):
+            if len(current) + len(piece) + 1 <= limit:
+                current = f"{current} {piece}".strip()
+            else:
+                if current:
+                    chunks.append(current)
+                current = piece
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def voice_log(guild: discord.Guild, text: str) -> None:
+    """Audit trail for voice activity -> #bot-logs. Never raises."""
+    try:
+        channel = guild.get_channel(BOT_LOGS_CHANNEL_ID)
+        if channel is None:
+            channel = await bot.fetch_channel(BOT_LOGS_CHANNEL_ID)
+        await channel.send(f"🎙️ {text}")
+    except Exception:
+        pass
+
+
+def resolve_member(guild: discord.Guild, query: str) -> tuple[discord.Member | None, list[str]]:
+    """Find a member by spoken name. Returns (member, ambiguous_names)."""
+    q = (query or "").strip().lower().lstrip("@")
+    if not q:
+        return None, []
+    members = [m for m in guild.members if not m.bot]
+    for m in members:
+        if q in {m.name.lower(), m.display_name.lower(), str(m).lower()}:
+            return m, []
+    partial = [m for m in members if q in m.display_name.lower() or q in m.name.lower()]
+    if len(partial) == 1:
+        return partial[0], []
+    if len(partial) > 1:
+        return None, [m.display_name for m in partial[:5]]
+    words = q.split()
+    scored = [m for m in members if any(w in m.display_name.lower() for w in words)]
+    if len(scored) == 1:
+        return scored[0], []
+    return None, []
+
+
+def _pcm_to_wav(pcm: bytes) -> bytes:
+    """Voice-recv PCM is 48kHz / 16-bit / stereo."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(48000)
+        wav.writeframes(pcm)
+    return buf.getvalue()
+
+
+class UtteranceSink(voice_recv.sinks.AudioSink if VOICE_RECV_AVAILABLE else object):
+    """Buffers each speaker's PCM; the session watcher flushes on silence."""
+
+    def __init__(self, session: dict) -> None:
+        if VOICE_RECV_AVAILABLE:
+            super().__init__()
+        self.session = session
+        self.buffers: dict[int, dict] = {}
+
+    def wants_opus(self) -> bool:
+        return False
+
+    def write(self, user, data) -> None:
+        if user is None or getattr(user, "bot", False):
+            return
+        entry = self.buffers.setdefault(user.id, {"pcm": bytearray(), "last": 0.0, "member": user})
+        try:
+            entry["pcm"] += data.pcm
+        except Exception:
+            return
+        entry["last"] = time.time()
+        entry["member"] = user
+
+    def cleanup(self) -> None:
+        self.buffers.clear()
+
+
+async def _speak(session: dict, text: str) -> None:
+    """Speak text in the session's voice channel (TTS), text fallback in chat."""
+    vc = session["vc"]
+    async with session["speak_lock"]:
+        for chunk in _chunk_text(text):
+            wav_bytes = await groq_speak_wav(chunk)
+            if not wav_bytes:
+                try:
+                    await session["text_channel"].send(f"🔊 {chunk}")
+                except Exception:
+                    pass
+                continue
+            path = None
+            try:
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp.write(wav_bytes)
+                    path = tmp.name
+                if not vc.is_connected():
+                    return
+                vc.play(discord.FFmpegPCMAudio(path))
+                while vc.is_playing():
+                    await asyncio.sleep(0.2)
+            except Exception as exc:
+                print(f"[SCRS] Voice playback error: {exc}", file=sys.stderr)
+            finally:
+                if path:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+
+
+async def _apply_voice_action(session: dict, action: dict) -> str:
+    """Execute a confirmed voice action. Returns a short spoken result."""
+    guild: discord.Guild = session["guild"]
+    actor: discord.Member = action["speaker"]
+    name = action["name"]
+    args = action["arguments"]
+
+    if name == "say_message":
+        await session["text_channel"].send(str(args.get("message", ""))[:2000])
+        await voice_log(guild, f"Voice /say by {actor}: {str(args.get('message', ''))[:150]}")
+        return "Message sent."
+
+    target = action.get("member_obj")
+    if target is None:
+        return "I couldn't find that member."
+
+    if name == "give_infraction":
+        records = store["infractions"].setdefault(str(target.id), [])
+        level = min(len(records) + 1, 3)
+        role_note = ""
+        role = find_role(guild, f"Infraction {level}")
+        if role:
+            try:
+                if role not in target.roles:
+                    await target.add_roles(role, reason=f"Infraction {level} via voice by {actor}")
+                role_note = f"Added role: **Infraction {level}**"
+            except discord.Forbidden:
+                role_note = "⚠️ Couldn't add the Infraction role (bot role too low)."
+        records.append(
+            {"by": actor.id, "reason": args.get("reason", ""), "proof": "Voice command", "level": level, "at": datetime.now(timezone.utc).isoformat()}
+        )
+        store["infractions"][str(target.id)] = records
+        save_store(store)
+        embed = base_embed("⚠️ Infraction Issued (voice command)", COLOUR_ALERT)
+        embed.add_field(name="Player", value=f"{target.mention} ({target.display_name})", inline=False)
+        embed.add_field(name="Infraction", value=f"Infraction {level} of 3", inline=True)
+        embed.add_field(name="Issued by", value=f"{actor.mention} (voice)", inline=True)
+        embed.add_field(name="Reason", value=args.get("reason", ""), inline=False)
+        if role_note:
+            embed.add_field(name="Role", value=role_note, inline=False)
+        await session["text_channel"].send(embed=embed)
+        await log_punishment(guild, embed)
+        await safe_dm(target, embed)
+        await voice_log(guild, f"Voice infraction {level} -> {target} by {actor}: {args.get('reason', '')}")
+        return f"Done. Infraction {level} given to {target.display_name}."
+
+    if name == "give_strike":
+        records = store["strikes"].setdefault(str(target.id), [])
+        level = min(len(records) + 1, 3)
+        new_role = find_role(guild, f"Staff Strike {level}")
+        if new_role:
+            try:
+                for old_level in (1, 2, 3):
+                    old_role = find_role(guild, f"Staff Strike {old_level}")
+                    if old_role and old_role in target.roles and old_role != new_role:
+                        await target.remove_roles(old_role, reason="Superseded by higher strike")
+                if new_role not in target.roles:
+                    await target.add_roles(new_role, reason=f"Staff Strike {level} via voice by {actor}")
+            except discord.Forbidden:
+                pass
+        records.append(
+            {"by": actor.id, "reason": args.get("reason", ""), "proof": "Voice command", "level": level, "at": datetime.now(timezone.utc).isoformat()}
+        )
+        store["strikes"][str(target.id)] = records
+        save_store(store)
+        embed = base_embed("🔨 Staff Strike Issued (voice command)", COLOUR_ALERT)
+        embed.add_field(name="Staff Member", value=f"{target.mention} ({target.display_name})", inline=False)
+        embed.add_field(name="Strike", value=f"Staff Strike {level} of 3", inline=True)
+        embed.add_field(name="Issued by", value=f"{actor.mention} (voice)", inline=True)
+        embed.add_field(name="Reason", value=args.get("reason", ""), inline=False)
+        await session["text_channel"].send(embed=embed)
+        await log_punishment(guild, embed)
+        await safe_dm(target, embed)
+        await voice_log(guild, f"Voice strike {level} -> {target} by {actor}: {args.get('reason', '')}")
+        return f"Done. Strike {level} given to {target.display_name}."
+
+    if name == "issue_ticket":
+        amount = int(args.get("amount", 0))
+        records = store["citations"].setdefault(str(target.id), [])
+        records.append(
+            {"by": actor.id, "reason": args.get("reason", ""), "penal_code": args.get("penal_code", "N/A"), "amount": amount, "at": datetime.now(timezone.utc).isoformat()}
+        )
+        store["citations"][str(target.id)] = records
+        save_store(store)
+        embed = base_embed("🎫 Ticket Issued (voice command)", COLOUR_STAFF)
+        embed.add_field(name="User", value=f"{target.mention} ({target.display_name})", inline=False)
+        embed.add_field(name="Reason", value=args.get("reason", ""), inline=False)
+        embed.add_field(name="Penal Code", value=str(args.get("penal_code", "N/A")), inline=True)
+        embed.add_field(name="Amount", value=f"${amount:,}", inline=True)
+        embed.add_field(name="Issued by", value=f"{actor.mention} (voice)", inline=True)
+        await session["text_channel"].send(embed=embed)
+        await log_punishment(guild, embed)
+        await safe_dm(target, embed)
+        await voice_log(guild, f"Voice ticket ${amount} -> {target} by {actor}: {args.get('reason', '')}")
+        return f"Done. Citation of {amount} dollars issued to {target.display_name}."
+
+    if name == "issue_warrant":
+        records = store["warrants"].setdefault(str(target.id), [])
+        records.append({"by": actor.id, "reason": args.get("reason", ""), "at": datetime.now(timezone.utc).isoformat(), "active": True})
+        store["warrants"][str(target.id)] = records
+        save_store(store)
+        embed = base_embed("📜 Warrant Issued (voice command)", COLOUR_ALERT)
+        embed.add_field(name="User", value=f"{target.mention} ({target.display_name})", inline=False)
+        embed.add_field(name="Reason", value=args.get("reason", ""), inline=False)
+        embed.add_field(name="Issued by", value=f"{actor.mention} (voice)", inline=True)
+        embed.add_field(name="Status", value="🔴 ACTIVE", inline=False)
+        await session["text_channel"].send(embed=embed)
+        await log_punishment(guild, embed)
+        await safe_dm(target, embed)
+        await voice_log(guild, f"Voice warrant -> {target} by {actor}: {args.get('reason', '')}")
+        return f"Done. Warrant issued for {target.display_name}."
+
+    return "That action isn't supported by voice yet."
+
+
+def _summarize_action(action: dict) -> str:
+    name, args = action["name"], action["arguments"]
+    target = action.get("member_obj")
+    tname = target.display_name if target else args.get("member", "?")
+    if name == "give_infraction":
+        return f"Infraction for {tname}. Reason: {args.get('reason', '')}."
+    if name == "give_strike":
+        return f"Staff strike for {tname}. Reason: {args.get('reason', '')}."
+    if name == "issue_ticket":
+        return f"Citation for {tname}, {int(args.get('amount', 0))} dollars. Reason: {args.get('reason', '')}."
+    if name == "issue_warrant":
+        return f"Warrant for {tname}. Reason: {args.get('reason', '')}."
+    if name == "say_message":
+        return f"Posting the message: {str(args.get('message', ''))[:120]}"
+    return name
+
+
+async def _process_utterance(session: dict, member: discord.Member, pcm: bytes) -> None:
+    if not isinstance(member, discord.Member) or not passes(member, HIGH_RANK_ROLES):
+        return  # only High Rank / admins can drive the bot by voice
+    wav_bytes = _pcm_to_wav(pcm)
+    transcript = await groq_transcribe(wav_bytes)
+    if len(transcript) < 3:
+        return
+    await voice_log(session["guild"], f"🗣️ {member.display_name}: “{transcript[:200]}”")
+    lowered = " ".join(transcript.lower().strip(" .!?").split())
+
+    pending = session.get("pending")
+    if pending and pending["speaker_id"] == member.id:
+        if time.time() <= pending["expires"]:
+            if lowered in CONFIRM_WORDS or lowered.startswith("confirm"):
+                session["pending"] = None
+                result = await _apply_voice_action(session, pending["action"])
+                await _speak(session, result)
+                return
+            if lowered in CANCEL_WORDS:
+                session["pending"] = None
+                await _speak(session, "Cancelled.")
+                return
+        else:
+            session["pending"] = None
+
+    parsed = await groq_parse_command(transcript)
+    if not parsed:
+        return
+    action = {"name": parsed["name"], "arguments": parsed.get("arguments", {}), "speaker": member}
+    if action["name"] != "say_message":
+        member_obj, ambiguous = resolve_member(session["guild"], str(action["arguments"].get("member", "")))
+        if member_obj is None:
+            if ambiguous:
+                await _speak(session, f"That name matches several people: {', '.join(ambiguous)}. Please be more specific.")
+            else:
+                await _speak(session, f"I couldn't find a member named {action['arguments'].get('member', '')}.")
+            return
+        action["member_obj"] = member_obj
+
+    if action["name"] == "say_message":
+        result = await _apply_voice_action(session, action)
+        await _speak(session, result)
+        return
+
+    summary = _summarize_action(action)
+    session["pending"] = {
+        "action": action,
+        "speaker_id": member.id,
+        "expires": time.time() + 30,
+    }
+    try:
+        await session["text_channel"].send(
+            embed=base_embed("🎙️ Voice command — confirmation needed", COLOUR_INFO, f"**{summary}**\n{member.mention}: say **“confirm”** within 30 seconds to execute, or “cancel”.")
+        )
+    except Exception:
+        pass
+    await _speak(session, f"{summary} Say confirm to proceed, or cancel.")
+
+
+async def _voice_watcher(session: dict) -> None:
+    """Flush a speaker's buffer after ~1.1s of silence and process it."""
+    sink: UtteranceSink = session["sink"]
+    BYTES_PER_SECOND = 48000 * 2 * 2  # 48kHz, stereo, 16-bit
+    while True:
+        await asyncio.sleep(0.3)
+        vc = session["vc"]
+        if not vc.is_connected():
+            break
+        now = time.time()
+        for user_id, entry in list(sink.buffers.items()):
+            if entry["last"] and now - entry["last"] >= 1.1:
+                pcm = bytes(entry["pcm"])
+                member = entry["member"]
+                sink.buffers.pop(user_id, None)
+                if len(pcm) >= int(BYTES_PER_SECOND * 0.35):
+                    asyncio.create_task(_process_utterance(session, member, pcm))
+    VOICE_SESSIONS.pop(session["guild"].id, None)
+
+
+async def _end_voice_session(guild_id: int) -> None:
+    session = VOICE_SESSIONS.pop(guild_id, None)
+    if not session:
+        return
+    task = session.get("watcher")
+    if task:
+        task.cancel()
+    try:
+        session["vc"].stop_listening()
+    except Exception:
+        pass
+    try:
+        await session["vc"].disconnect(force=True)
+    except Exception:
+        pass
+
+
+@bot.tree.command(name="voicejoin", description="Join your voice channel and enable Groq voice commands (High Rank)")
+@high_rank_only()
+@app_commands.describe(channel="Voice channel to join (default: yours, or the RTO channel)")
+async def voicejoin(interaction: discord.Interaction, channel: discord.VoiceChannel | None = None) -> None:
+    if not VOICE_RECV_AVAILABLE:
+        await interaction.response.send_message(
+            "🎙️ Voice receiving isn't available on this host yet — the `discord-ext-voice-recv` package needs to be installed (it's in requirements.txt; restart the server after updating it).",
+            ephemeral=True,
+        )
+        return
+    if not GROQ_API_KEY:
+        await interaction.response.send_message(
+            "🎙️ `GROQ_API_KEY` isn't set in the bot's environment (.env on Katabump). Add it and restart, then try again.",
+            ephemeral=True,
+        )
+        return
+    guild = interaction.guild
+    if guild.id in VOICE_SESSIONS:
+        await interaction.response.send_message("🎙️ A voice session is already active in this server. Use /voiceleave first.", ephemeral=True)
+        return
+    target = channel
+    if target is None and isinstance(interaction.user, discord.Member) and interaction.user.voice:
+        target = interaction.user.voice.channel
+    if target is None:
+        for ch in guild.voice_channels:
+            if "rto" in ch.name.lower():
+                target = ch
+                break
+    if target is None:
+        await interaction.response.send_message("🎙️ Join a voice channel first, or pick one with the channel option.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        vc = await target.connect(cls=voice_recv.VoiceRecvClient, self_deaf=False, timeout=30)
+    except Exception as exc:
+        await interaction.followup.send(f"🎙️ Couldn't join {target.mention}: {exc}", ephemeral=True)
+        return
+
+    session = {
+        "guild": guild,
+        "vc": vc,
+        "text_channel": interaction.channel,
+        "pending": None,
+        "speak_lock": asyncio.Lock(),
+    }
+    sink = UtteranceSink(session)
+    session["sink"] = sink
+    vc.listen(sink)
+    session["watcher"] = asyncio.create_task(_voice_watcher(session))
+    VOICE_SESSIONS[guild.id] = session
+    await voice_log(guild, f"Voice session started in **{target.name}** by {interaction.user}.")
+    await interaction.followup.send(
+        f"🎙️ Voice assistant active in {target.mention}. High Rank members can speak commands now — destructive actions ask for a spoken “confirm” first. 911 calls will be read aloud here.",
+        ephemeral=True,
+    )
+    await _speak(session, "Voice assistant online. I am listening for staff commands.")
+
+
+@bot.tree.command(name="voiceleave", description="Stop the voice assistant and leave the voice channel")
+@high_rank_only()
+async def voiceleave(interaction: discord.Interaction) -> None:
+    if interaction.guild.id not in VOICE_SESSIONS:
+        await interaction.response.send_message("🎙️ No voice session is active.", ephemeral=True)
+        return
+    await _end_voice_session(interaction.guild.id)
+    await voice_log(interaction.guild, f"Voice session ended by {interaction.user}.")
+    await interaction.response.send_message("🎙️ Voice assistant off — left the channel.", ephemeral=True)
 
 
 # --------------------------------------------------------------------------- #

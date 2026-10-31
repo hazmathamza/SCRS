@@ -29,6 +29,8 @@ Custom Discord bot for the **Sunshine Coast Roleplay Server (SCRS)** — a Roblo
 | `/unregistercar <plate>` | Civilian | Removes your car with that plate. |
 | `/specialrpreq <roleplay> <details> [when]` | Staff Team | Requests a **special roleplay** — the type is picked from a **dropdown** (bank robbery, hostage situation, prison break, etc.; edit `SPECIAL_RP_TYPES` in `bot.py` to change the list). The request posts to **#special-rp-request** pinging **@Management once**, with **Accept / Deny** buttons (Management / High Rank only). The requesting staff member gets a **DM with the result** either way. |
 | `/911 <service> <location> <situation>` | Civilian | Posts a **911 call** in #911. The caller **chooses the service — Police, Sheriff, Fire Department, or All** — and the bot **pings that service's role**. Hooked up to Vaydin's roles (verified Oct 30, 2026): Police → **Sarasota Police Department**, Sheriff → **Sarasota County**, Fire → **Sarasota Fire Department** (exact names first, partial-name match if renamed, Emergency Services fallback if a service role is ever missing). Units can claim the call with the **Responding** button. |
+| `/voicejoin [channel]`, `/voiceleave` | High Rank | **Groq voice assistant.** The bot joins your voice channel (or RTO) and listens to High Rank speakers: speech → Whisper transcription → LLM (gpt-oss-120b) tool-calling → for infractions/strikes/tickets/warrants it **speaks back what it's about to do and waits for a spoken "confirm"** before executing; results are posted as embeds, DM'd, and audited in #bot-logs. While a session is active, **911 calls are read aloud** in the channel (dispatch). Needs `GROQ_API_KEY` in `.env` + the voice packages in requirements.txt (PyNaCl, discord-ext-voice-recv, davey). Model IDs are env-overridable (see `.env.example`). |
+| `/sysinfo` | High Rank | Host diagnostics: Python/discord.py versions, FFmpeg path, libopus, PyNaCl, voice-ready verdict. |
 | `/ping`, `/help` | Anyone | Latency/uptime check and the command list. |
 
 **Command logging:** every slash command used (successful or failed) is logged to **#bot-logs** (channel ID `1565320716130455562`, override with the `BOT_LOGS_CHANNEL_ID` env var) with the user, channel, options and status.
@@ -48,7 +50,7 @@ https://discord.com/oauth2/authorize?client_id=1564958134886334497&permissions=8
 ## Updating on Katabump (from v1)
 
 1. Panel → **Files**: delete the old `bot.py` (keep your `.env` and `data/store.json` — v2 reads the same data file and adds the new sections automatically).
-2. Upload the new `bot.py` (and `requirements.txt` — unchanged), or upload the zip and extract.
+2. Upload the new `bot.py` and `requirements.txt` (v3 adds PyNaCl + discord-ext-voice-recv + davey for voice), or upload the zip and extract. For voice, also add `GROQ_API_KEY=...` to your `.env`.
 3. **Restart** the server. Console shows slash commands syncing, then `Logged in as SCRS#8394`.
 4. In Discord, type `/` — the SCRS commands should be listed.
 
