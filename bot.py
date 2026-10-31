@@ -436,7 +436,7 @@ def profile_embed(member: discord.Member, section: str = "overview") -> discord.
                 codes = ", ".join(a.get("charges", []))
                 lines.append(
                     f"**#{len(arrests) - i + 1}** — {when} • {a.get('top_class', '—')} • "
-                    f"Fine ${int(a.get('fine', 0)):,} • Jail {int(a.get('jail', 0))} min\n"
+                    f"Fine ${int(a.get('fine', 0)):,} • Jail {int(a.get('jail', 0))}s\n"
                     f"Charges: {codes}"
                 )
             embed.description = "\n\n".join(lines[:10])
@@ -1168,54 +1168,216 @@ async def ticket(
 # the server's official penal code document.
 # --------------------------------------------------------------------------- #
 
-# classification -> severity rank (higher = more severe)
+# classification -> severity rank (higher = more severe). Florida classes
+# from the official SCRS Penal Codes sheet (compiled by curbydes).
 CLASS_RANK = {
     "Infraction": 1,
-    "Misdemeanor": 2,
-    "Felony": 3,
-    "Second-Degree Felony": 4,
-    "First-Degree Felony": 5,
+    "Misd. 2nd": 2,
+    "Misd. 1st": 3,
+    "Felony 3rd": 4,
+    "Felony 2nd": 5,
+    "Felony 1st": 6,
+    "F1 — Life": 7,
+    "Life Felony": 8,
+    "Capital": 9,
+    "Enhancement": 0,  # attaches to another charge; never the lead charge
+    "Varies": 0,
 }
 CLASS_EMOJI = {
-    "Infraction": "🟢",
-    "Misdemeanor": "🟡",
-    "Felony": "🟠",
-    "Second-Degree Felony": "🔴",
-    "First-Degree Felony": "⚫",
+    "Infraction": "⚪",
+    "Misd. 2nd": "🟢",
+    "Misd. 1st": "🟡",
+    "Felony 3rd": "🟠",
+    "Felony 2nd": "🔴",
+    "Felony 1st": "🟣",
+    "F1 — Life": "⚫",
+    "Life Felony": "⚫",
+    "Capital": "💀",
+    "Enhancement": "➕",
+    "Varies": "❔",
 }
 
-# code, title, classification, fine $, suggested jail (minutes)
+# Official SCRS penal code book (State of Florida — SCRS Penal Code sheet):
+# code, title, classification, fine $, jail SECONDS (stacked jail caps at
+# 900s per the sheet's Sentencing Guide; the highest charge leads).
 PENAL_CODES: list[dict] = [
-    {"code": "PC-101", "title": "Speeding", "classification": "Infraction", "fine": 150, "jail": 0},
-    {"code": "PC-102", "title": "Disorderly Conduct", "classification": "Infraction", "fine": 75, "jail": 0},
-    {"code": "PC-103", "title": "Trespassing", "classification": "Infraction", "fine": 100, "jail": 0},
-    {"code": "PC-201", "title": "Reckless Driving", "classification": "Misdemeanor", "fine": 300, "jail": 5},
-    {"code": "PC-202", "title": "Resisting Arrest", "classification": "Misdemeanor", "fine": 250, "jail": 5},
-    {"code": "PC-203", "title": "Assault", "classification": "Misdemeanor", "fine": 400, "jail": 10},
-    {"code": "PC-204", "title": "Drug Possession", "classification": "Misdemeanor", "fine": 350, "jail": 10},
-    {"code": "PC-205", "title": "Obstruction of Justice", "classification": "Misdemeanor", "fine": 300, "jail": 8},
-    {"code": "PC-206", "title": "Vandalism", "classification": "Misdemeanor", "fine": 200, "jail": 5},
-    {"code": "PC-301", "title": "Evading a Law Enforcement Officer", "classification": "Felony", "fine": 750, "jail": 15},
-    {"code": "PC-302", "title": "Grand Theft Auto", "classification": "Felony", "fine": 800, "jail": 20},
-    {"code": "PC-303", "title": "Assault with a Deadly Weapon", "classification": "Felony", "fine": 1000, "jail": 25},
-    {"code": "PC-304", "title": "Possession of an Illegal Firearm", "classification": "Felony", "fine": 900, "jail": 20},
-    {"code": "PC-305", "title": "Drug Trafficking", "classification": "Felony", "fine": 1800, "jail": 35},
-    {"code": "PC-306", "title": "Bribery of an Officer", "classification": "Felony", "fine": 1200, "jail": 20},
-    {"code": "PC-401", "title": "Armed Robbery", "classification": "Second-Degree Felony", "fine": 1500, "jail": 30},
-    {"code": "PC-402", "title": "Attempted Murder", "classification": "Second-Degree Felony", "fine": 2000, "jail": 40},
-    {"code": "PC-403", "title": "Kidnapping", "classification": "Second-Degree Felony", "fine": 2500, "jail": 40},
-    {"code": "PC-501", "title": "Bank Robbery", "classification": "First-Degree Felony", "fine": 3000, "jail": 45},
-    {"code": "PC-502", "title": "Murder", "classification": "First-Degree Felony", "fine": 5000, "jail": 60},
+    {"code": "(1)01", "title": "Assault", "classification": "Misd. 2nd", "fine": 250, "jail": 15, "statute": "F.S. § 784.011", "group": "Title I"},
+    {"code": "(1)02", "title": "Aggravated Assault (Deadly Weapon)", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 784.021", "group": "Title I"},
+    {"code": "(1)03", "title": "Battery", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 784.03", "group": "Title I"},
+    {"code": "(1)04", "title": "Felony Battery", "classification": "Felony 3rd", "fine": 1250, "jail": 90, "statute": "F.S. § 784.041", "group": "Title I"},
+    {"code": "(1)05", "title": "Aggravated Battery", "classification": "Felony 2nd", "fine": 2000, "jail": 150, "statute": "F.S. § 784.045", "group": "Title I"},
+    {"code": "(1)06", "title": "Assault on LEO / Firefighter / EMS", "classification": "Misd. 1st", "fine": 750, "jail": 60, "statute": "F.S. § 784.07", "group": "Title I"},
+    {"code": "(1)07", "title": "Battery on LEO / Firefighter / EMS", "classification": "Felony 3rd", "fine": 1500, "jail": 120, "statute": "F.S. § 784.07", "group": "Title I"},
+    {"code": "(1)08", "title": "Battery on Person 65 or Older", "classification": "Felony 3rd", "fine": 1250, "jail": 90, "statute": "F.S. § 784.08", "group": "Title I"},
+    {"code": "(1)09", "title": "Culpable Negligence", "classification": "Misd. 2nd", "fine": 300, "jail": 20, "statute": "F.S. § 784.05", "group": "Title I"},
+    {"code": "(1)10", "title": "Stalking", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 784.048(2)", "group": "Title I"},
+    {"code": "(1)11", "title": "Aggravated Stalking", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 784.048(3)", "group": "Title I"},
+    {"code": "(1)12", "title": "Written or Electronic Threats to Kill", "classification": "Felony 2nd", "fine": 2000, "jail": 150, "statute": "F.S. § 836.10", "group": "Title I"},
+    {"code": "(1)13", "title": "Murder — First Degree", "classification": "Capital", "fine": 7500, "jail": 900, "statute": "F.S. § 782.04(1)", "group": "Title I"},
+    {"code": "(1)14", "title": "Murder — Second Degree", "classification": "Life Felony", "fine": 5000, "jail": 600, "statute": "F.S. § 782.04(2)", "group": "Title I"},
+    {"code": "(1)15", "title": "Murder — Third Degree", "classification": "Felony 2nd", "fine": 3000, "jail": 300, "statute": "F.S. § 782.04(4)", "group": "Title I"},
+    {"code": "(1)16", "title": "Attempted Murder — First Degree", "classification": "Felony 1st", "fine": 3500, "jail": 420, "statute": "F.S. §§ 777.04 / 782.04(1)", "group": "Title I"},
+    {"code": "(1)17", "title": "Attempted Murder — Second Degree", "classification": "Felony 2nd", "fine": 2500, "jail": 300, "statute": "F.S. §§ 777.04 / 782.04(2)", "group": "Title I"},
+    {"code": "(1)18", "title": "Manslaughter", "classification": "Felony 2nd", "fine": 2500, "jail": 240, "statute": "F.S. § 782.07(1)", "group": "Title I"},
+    {"code": "(1)19", "title": "Aggravated Manslaughter (Child / Elderly / Officer)", "classification": "Felony 1st", "fine": 3500, "jail": 360, "statute": "F.S. § 782.07(2)–(4)", "group": "Title I"},
+    {"code": "(1)20", "title": "Vehicular Homicide", "classification": "Felony 2nd", "fine": 2500, "jail": 240, "statute": "F.S. § 782.071", "group": "Title I"},
+    {"code": "(1)21", "title": "Kidnapping", "classification": "Felony 1st", "fine": 3500, "jail": 420, "statute": "F.S. § 787.01", "group": "Title I"},
+    {"code": "(1)22", "title": "False Imprisonment", "classification": "Felony 3rd", "fine": 1000, "jail": 120, "statute": "F.S. § 787.02", "group": "Title I"},
+    {"code": "(1)23", "title": "Human Trafficking", "classification": "Felony 1st", "fine": 5000, "jail": 600, "statute": "F.S. § 787.06", "group": "Title I"},
+    {"code": "(1)24", "title": "Robbery with a Firearm", "classification": "F1 — Life", "fine": 4000, "jail": 480, "statute": "F.S. § 812.13(2)(a)", "group": "Title I"},
+    {"code": "(1)25", "title": "Robbery with a Weapon (Non-Firearm)", "classification": "Felony 1st", "fine": 3000, "jail": 360, "statute": "F.S. § 812.13(2)(b)", "group": "Title I"},
+    {"code": "(1)26", "title": "Robbery (Unarmed / Strong-Arm)", "classification": "Felony 2nd", "fine": 2000, "jail": 240, "statute": "F.S. § 812.13(2)(c)", "group": "Title I"},
+    {"code": "(1)27", "title": "Robbery by Sudden Snatching", "classification": "Felony 3rd", "fine": 1000, "jail": 120, "statute": "F.S. § 812.131", "group": "Title I"},
+    {"code": "(1)28", "title": "Carjacking", "classification": "Felony 1st", "fine": 3500, "jail": 420, "statute": "F.S. § 812.133", "group": "Title I"},
+    {"code": "(1)29", "title": "Home-Invasion Robbery", "classification": "Felony 1st", "fine": 3500, "jail": 420, "statute": "F.S. § 812.135", "group": "Title I"},
+    {"code": "(2)01", "title": "Arson — First Degree", "classification": "Felony 1st", "fine": 3500, "jail": 360, "statute": "F.S. § 806.01(1)", "group": "Title II"},
+    {"code": "(2)02", "title": "Arson — Second Degree", "classification": "Felony 2nd", "fine": 2000, "jail": 240, "statute": "F.S. § 806.01(2)", "group": "Title II"},
+    {"code": "(2)03", "title": "Intentional Burning of Lands", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 590.28", "group": "Title II"},
+    {"code": "(2)04", "title": "Trespass in Structure or Conveyance", "classification": "Misd. 2nd", "fine": 250, "jail": 20, "statute": "F.S. § 810.08", "group": "Title II"},
+    {"code": "(2)05", "title": "Trespass on Property (Posted / After Warning)", "classification": "Misd. 1st", "fine": 500, "jail": 30, "statute": "F.S. § 810.09", "group": "Title II"},
+    {"code": "(2)06", "title": "Armed Trespass", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. §§ 810.08(2)(c) / 810.09(2)(c)", "group": "Title II"},
+    {"code": "(2)07", "title": "Trespass on School Grounds / Restricted Facility", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. §§ 810.095 / 810.09(2)(e)", "group": "Title II"},
+    {"code": "(2)08", "title": "Burglary of a Dwelling", "classification": "Felony 2nd", "fine": 2000, "jail": 240, "statute": "F.S. § 810.02(3)", "group": "Title II"},
+    {"code": "(2)09", "title": "Burglary of a Structure or Conveyance", "classification": "Felony 3rd", "fine": 1000, "jail": 120, "statute": "F.S. § 810.02(4)", "group": "Title II"},
+    {"code": "(2)10", "title": "Armed Burglary / Burglary with Assault or Battery", "classification": "F1 — Life", "fine": 4000, "jail": 480, "statute": "F.S. § 810.02(2)", "group": "Title II"},
+    {"code": "(2)11", "title": "Possession of Burglary Tools", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 810.06", "group": "Title II"},
+    {"code": "(2)12", "title": "Petit Theft (Under $750)", "classification": "Misd. 2nd", "fine": 250, "jail": 20, "statute": "F.S. § 812.014(3)", "group": "Title II"},
+    {"code": "(2)13", "title": "Grand Theft — Third Degree ($750–$20,000)", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 812.014(2)(c)", "group": "Title II"},
+    {"code": "(2)14", "title": "Grand Theft — Second Degree ($20,000–$100,000)", "classification": "Felony 2nd", "fine": 2000, "jail": 180, "statute": "F.S. § 812.014(2)(b)", "group": "Title II"},
+    {"code": "(2)15", "title": "Grand Theft — First Degree ($100,000+)", "classification": "Felony 1st", "fine": 3500, "jail": 300, "statute": "F.S. § 812.014(2)(a)", "group": "Title II"},
+    {"code": "(2)16", "title": "Grand Theft of a Motor Vehicle", "classification": "Felony 3rd", "fine": 1500, "jail": 120, "statute": "F.S. § 812.014(2)(c)6", "group": "Title II"},
+    {"code": "(2)17", "title": "Theft of a Firearm", "classification": "Felony 3rd", "fine": 1500, "jail": 120, "statute": "F.S. § 812.014(2)(c)5", "group": "Title II"},
+    {"code": "(2)18", "title": "Retail Theft (Organized / Coordinated)", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 812.015", "group": "Title II"},
+    {"code": "(2)19", "title": "Dealing in Stolen Property", "classification": "Felony 2nd", "fine": 2000, "jail": 180, "statute": "F.S. § 812.019", "group": "Title II"},
+    {"code": "(2)20", "title": "Extortion", "classification": "Felony 2nd", "fine": 2000, "jail": 180, "statute": "F.S. § 836.05", "group": "Title II"},
+    {"code": "(2)21", "title": "Forgery", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 831.01", "group": "Title II"},
+    {"code": "(2)22", "title": "Uttering a Forged Instrument", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 831.02", "group": "Title II"},
+    {"code": "(2)23", "title": "Forging or Counterfeiting Government ID", "classification": "Felony 2nd", "fine": 2000, "jail": 180, "statute": "F.S. § 831.29", "group": "Title II"},
+    {"code": "(2)24", "title": "Scheme to Defraud / Organized Fraud", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 817.034", "group": "Title II"},
+    {"code": "(2)25", "title": "Credit Card Fraud", "classification": "Misd. 1st", "fine": 750, "jail": 60, "statute": "F.S. § 817.61", "group": "Title II"},
+    {"code": "(2)26", "title": "Identity Theft (Criminal Use of Personal ID)", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. § 817.568", "group": "Title II"},
+    {"code": "(2)27", "title": "Criminal Mischief (Under $200)", "classification": "Misd. 2nd", "fine": 250, "jail": 15, "statute": "F.S. § 806.13(1)(b)1", "group": "Title II"},
+    {"code": "(2)28", "title": "Criminal Mischief ($200–$1,000)", "classification": "Misd. 1st", "fine": 500, "jail": 30, "statute": "F.S. § 806.13(1)(b)2", "group": "Title II"},
+    {"code": "(2)29", "title": "Criminal Mischief (Over $1,000)", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 806.13(1)(b)3", "group": "Title II"},
+    {"code": "(2)30", "title": "Criminal Mischief to Public / Government Property", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. § 806.13", "group": "Title II"},
+    {"code": "(2)31", "title": "Commercial Dumping / Felony Littering", "classification": "Felony 3rd", "fine": 1000, "jail": 60, "statute": "F.S. § 403.413(6)(c)", "group": "Title II"},
+    {"code": "(2)32", "title": "Failure to Pay Fine", "classification": "Misd. 2nd", "fine": 0, "jail": 30, "statute": "SFRG Admin. Code § 1", "group": "Title II", "note": "Fine x2 — doubles the unpaid fine"},
+    {"code": "(3)01", "title": "Bribery of a Public Servant", "classification": "Felony 2nd", "fine": 2000, "jail": 180, "statute": "F.S. § 838.015", "group": "Title III"},
+    {"code": "(3)02", "title": "Unlawful Compensation for Official Behavior", "classification": "Felony 2nd", "fine": 2000, "jail": 180, "statute": "F.S. § 838.016", "group": "Title III"},
+    {"code": "(3)03", "title": "Official Misconduct (Corruption from Public Duty)", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. § 838.022", "group": "Title III"},
+    {"code": "(3)04", "title": "Tampering with a Witness or Victim", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. § 914.22", "group": "Title III"},
+    {"code": "(3)05", "title": "Perjury in Official Proceeding", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 837.02", "group": "Title III"},
+    {"code": "(3)06", "title": "False Official Statement", "classification": "Misd. 2nd", "fine": 300, "jail": 20, "statute": "F.S. § 837.06", "group": "Title III"},
+    {"code": "(3)07", "title": "False Report of a Crime", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 817.49", "group": "Title III"},
+    {"code": "(3)08", "title": "False Report to LEO (Alleging a Felony)", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 837.05(2)", "group": "Title III"},
+    {"code": "(3)09", "title": "Giving False Name / ID to Law Enforcement", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 901.36", "group": "Title III"},
+    {"code": "(3)10", "title": "Failure to Identify to a Peace Officer (Lawful Stop)", "classification": "Misd. 2nd", "fine": 300, "jail": 20, "statute": "F.S. § 856.021 (cf.)", "group": "Title III"},
+    {"code": "(3)11", "title": "Impersonating an Officer / Public Official", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. § 843.08", "group": "Title III"},
+    {"code": "(3)12", "title": "Impersonating an Officer During a Felony", "classification": "Felony 2nd", "fine": 2000, "jail": 180, "statute": "F.S. § 843.08", "group": "Title III"},
+    {"code": "(3)13", "title": "Resisting an Officer Without Violence", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 843.02", "group": "Title III"},
+    {"code": "(3)14", "title": "Resisting an Officer With Violence", "classification": "Felony 3rd", "fine": 1500, "jail": 120, "statute": "F.S. § 843.01", "group": "Title III"},
+    {"code": "(3)15", "title": "Obstruction by Disguised Person", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 843.03", "group": "Title III"},
+    {"code": "(3)16", "title": "Escape from Custody or Confinement", "classification": "Felony 2nd", "fine": 2000, "jail": 300, "statute": "F.S. § 944.40", "group": "Title III"},
+    {"code": "(3)17", "title": "Aiding an Escape", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. § 843.12", "group": "Title III"},
+    {"code": "(3)18", "title": "Tampering with or Fabricating Evidence", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 918.13", "group": "Title III"},
+    {"code": "(3)19", "title": "Introduction of Contraband into Detention Facility", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. § 951.22", "group": "Title III"},
+    {"code": "(3)20", "title": "Violation of Probation or Parole", "classification": "Varies", "fine": 0, "jail": 0, "statute": "F.S. § 948.06", "group": "Title III", "note": "Varies — booked one degree below the underlying offense"},
+    {"code": "(3)21", "title": "Failure to Appear", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 843.15", "group": "Title III"},
+    {"code": "(3)22", "title": "Unauthorized Use / Interception of Police Communications", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 843.165", "group": "Title III"},
+    {"code": "(3)23", "title": "Failure to Comply with Lawful Order", "classification": "Misd. 2nd", "fine": 300, "jail": 20, "statute": "F.S. § 316.072(3)", "group": "Title III"},
+    {"code": "(4)01", "title": "Disorderly Conduct / Breach of the Peace", "classification": "Misd. 2nd", "fine": 250, "jail": 15, "statute": "F.S. § 877.03", "group": "Title IV"},
+    {"code": "(4)02", "title": "Disorderly Intoxication (Public)", "classification": "Misd. 2nd", "fine": 250, "jail": 20, "statute": "F.S. § 856.011", "group": "Title IV"},
+    {"code": "(4)03", "title": "Affray (Fighting in a Public Place)", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 870.01(1)", "group": "Title IV"},
+    {"code": "(4)04", "title": "Riot", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. § 870.01(2)", "group": "Title IV"},
+    {"code": "(4)05", "title": "Aggravated Riot", "classification": "Felony 2nd", "fine": 2000, "jail": 240, "statute": "F.S. § 870.01(3)", "group": "Title IV"},
+    {"code": "(4)06", "title": "Inciting a Riot", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. § 870.01(4)", "group": "Title IV"},
+    {"code": "(4)07", "title": "Unlawful Assembly", "classification": "Misd. 2nd", "fine": 300, "jail": 20, "statute": "F.S. § 870.02", "group": "Title IV"},
+    {"code": "(4)08", "title": "Loitering or Prowling", "classification": "Misd. 2nd", "fine": 250, "jail": 15, "statute": "F.S. § 856.021", "group": "Title IV"},
+    {"code": "(4)09", "title": "Wearing a Mask / Hood to Conceal Identity During Crime", "classification": "Misd. 2nd", "fine": 300, "jail": 20, "statute": "F.S. §§ 876.12–876.155", "group": "Title IV"},
+    {"code": "(4)10", "title": "Harassing / Threatening Communications", "classification": "Misd. 2nd", "fine": 250, "jail": 15, "statute": "F.S. § 365.16", "group": "Title IV"},
+    {"code": "(4)11", "title": "Obstructing a Public Street or Highway", "classification": "Misd. 2nd", "fine": 250, "jail": 15, "statute": "F.S. § 316.2045", "group": "Title IV"},
+    {"code": "(4)12", "title": "Interference with Government Operations", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 843.02 (cf.)", "group": "Title IV"},
+    {"code": "(5)01", "title": "Possession of Cannabis (Under 20 Grams)", "classification": "Misd. 1st", "fine": 500, "jail": 30, "statute": "F.S. § 893.13(6)(b)", "group": "Title V"},
+    {"code": "(5)02", "title": "Possession of a Controlled Substance", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 893.13(6)(a)", "group": "Title V"},
+    {"code": "(5)03", "title": "Possession with Intent to Sell / Deliver", "classification": "Felony 2nd", "fine": 2000, "jail": 150, "statute": "F.S. § 893.13(1)(a)", "group": "Title V"},
+    {"code": "(5)04", "title": "Sale, Manufacture, or Delivery of a Controlled Substance", "classification": "Felony 2nd", "fine": 2000, "jail": 180, "statute": "F.S. § 893.13(1)", "group": "Title V"},
+    {"code": "(5)05", "title": "Sale Within 1,000 ft of School, Park, or Church", "classification": "Felony 1st", "fine": 3500, "jail": 300, "statute": "F.S. § 893.13(1)(c)", "group": "Title V"},
+    {"code": "(5)06", "title": "Drug Trafficking (Threshold Quantities)", "classification": "Felony 1st", "fine": 5000, "jail": 480, "statute": "F.S. § 893.135", "group": "Title V"},
+    {"code": "(5)07", "title": "Possession of Drug Paraphernalia", "classification": "Misd. 1st", "fine": 500, "jail": 30, "statute": "F.S. § 893.147", "group": "Title V"},
+    {"code": "(5)08", "title": "Maintaining a Drug Dwelling / Vehicle", "classification": "Misd. 1st", "fine": 750, "jail": 60, "statute": "F.S. § 893.13(7)(a)5", "group": "Title V"},
+    {"code": "(5)09", "title": "Possession of Alcohol by Person Under 21", "classification": "Misd. 2nd", "fine": 250, "jail": 15, "statute": "F.S. § 562.111", "group": "Title V"},
+    {"code": "(5)10", "title": "Selling / Giving Alcohol to a Minor", "classification": "Misd. 2nd", "fine": 500, "jail": 30, "statute": "F.S. § 562.11", "group": "Title V"},
+    {"code": "(5)11", "title": "Open Container — Driver", "classification": "Infraction", "fine": 250, "jail": 0, "statute": "F.S. § 316.1936", "group": "Title V"},
+    {"code": "(5)12", "title": "Open Container — Passenger / Pedestrian", "classification": "Infraction", "fine": 150, "jail": 0, "statute": "F.S. § 316.1936", "group": "Title V"},
+    {"code": "(5)13", "title": "Animal Cruelty", "classification": "Misd. 1st", "fine": 750, "jail": 60, "statute": "F.S. § 828.12(1)", "group": "Title V"},
+    {"code": "(5)14", "title": "Aggravated Animal Cruelty", "classification": "Felony 3rd", "fine": 1500, "jail": 120, "statute": "F.S. § 828.12(2)", "group": "Title V"},
+    {"code": "(5)15", "title": "Child Neglect / Endangerment", "classification": "Felony 3rd", "fine": 1500, "jail": 120, "statute": "F.S. § 827.03", "group": "Title V"},
+    {"code": "(5)16", "title": "Wanton Endangerment / Reckless Discharge of Hazard", "classification": "Misd. 1st", "fine": 750, "jail": 60, "statute": "F.S. § 784.05 (cf.)", "group": "Title V"},
+    {"code": "(6)01", "title": "Speeding (1–15 MPH Over)", "classification": "Infraction", "fine": 150, "jail": 0, "statute": "F.S. § 316.183", "group": "Title VI"},
+    {"code": "(6)02", "title": "Speeding (16–29 MPH Over)", "classification": "Infraction", "fine": 300, "jail": 0, "statute": "F.S. § 316.183", "group": "Title VI"},
+    {"code": "(6)03", "title": "Excessive Speeding (30–49 MPH Over)", "classification": "Infraction", "fine": 500, "jail": 0, "statute": "F.S. § 316.1926", "group": "Title VI"},
+    {"code": "(6)04", "title": "Dangerous Excessive Speeding (50+ Over or 100+ MPH)", "classification": "Misd. 2nd", "fine": 500, "jail": 20, "statute": "F.S. § 316.1926", "group": "Title VI"},
+    {"code": "(6)05", "title": "Careless Driving", "classification": "Infraction", "fine": 200, "jail": 0, "statute": "F.S. § 316.1925", "group": "Title VI"},
+    {"code": "(6)06", "title": "Reckless Driving", "classification": "Misd. 2nd", "fine": 500, "jail": 30, "statute": "F.S. § 316.192", "group": "Title VI"},
+    {"code": "(6)07", "title": "Street Racing / Highway Racing", "classification": "Misd. 1st", "fine": 1000, "jail": 60, "statute": "F.S. § 316.191", "group": "Title VI"},
+    {"code": "(6)08", "title": "Fleeing or Attempting to Elude", "classification": "Felony 3rd", "fine": 1500, "jail": 150, "statute": "F.S. § 316.1935(1)", "group": "Title VI"},
+    {"code": "(6)09", "title": "Aggravated Fleeing (High Speed / Wanton Disregard)", "classification": "Felony 2nd", "fine": 2500, "jail": 240, "statute": "F.S. § 316.1935(3)", "group": "Title VI"},
+    {"code": "(6)10", "title": "DUI — First Offense", "classification": "Misd. 2nd", "fine": 1000, "jail": 60, "statute": "F.S. § 316.193", "group": "Title VI"},
+    {"code": "(6)11", "title": "DUI with Serious Bodily Injury", "classification": "Felony 3rd", "fine": 2000, "jail": 180, "statute": "F.S. § 316.193(3)", "group": "Title VI"},
+    {"code": "(6)12", "title": "DUI Manslaughter", "classification": "Felony 2nd", "fine": 3000, "jail": 300, "statute": "F.S. § 316.193(3)(c)3", "group": "Title VI"},
+    {"code": "(6)13", "title": "Driving Without a Valid License", "classification": "Misd. 2nd", "fine": 300, "jail": 15, "statute": "F.S. § 322.03", "group": "Title VI"},
+    {"code": "(6)14", "title": "Driving While License Suspended (Knowingly)", "classification": "Misd. 2nd", "fine": 500, "jail": 30, "statute": "F.S. § 322.34(2)", "group": "Title VI"},
+    {"code": "(6)15", "title": "Hit and Run — Property Damage", "classification": "Misd. 2nd", "fine": 500, "jail": 30, "statute": "F.S. § 316.061", "group": "Title VI"},
+    {"code": "(6)16", "title": "Hit and Run — Injury", "classification": "Felony 3rd", "fine": 1500, "jail": 150, "statute": "F.S. § 316.027(2)(a)", "group": "Title VI"},
+    {"code": "(6)17", "title": "Hit and Run — Death", "classification": "Felony 1st", "fine": 3500, "jail": 420, "statute": "F.S. § 316.027(2)(c)", "group": "Title VI"},
+    {"code": "(6)18", "title": "Running a Red Light / Stop Sign", "classification": "Infraction", "fine": 200, "jail": 0, "statute": "F.S. §§ 316.075 / 316.123", "group": "Title VI"},
+    {"code": "(6)19", "title": "Failure to Yield to Emergency Vehicle (Move Over Law)", "classification": "Infraction", "fine": 250, "jail": 0, "statute": "F.S. § 316.126", "group": "Title VI"},
+    {"code": "(6)20", "title": "Failure to Stop for a School Bus", "classification": "Infraction", "fine": 300, "jail": 0, "statute": "F.S. § 316.172", "group": "Title VI"},
+    {"code": "(6)21", "title": "Unregistered Vehicle / Expired Registration", "classification": "Infraction", "fine": 150, "jail": 0, "statute": "F.S. § 320.02", "group": "Title VI"},
+    {"code": "(6)22", "title": "No Proof of Insurance", "classification": "Infraction", "fine": 150, "jail": 0, "statute": "F.S. § 316.646", "group": "Title VI"},
+    {"code": "(6)23", "title": "Illegal Parking / Obstructing Traffic", "classification": "Infraction", "fine": 100, "jail": 0, "statute": "F.S. § 316.1945", "group": "Title VI"},
+    {"code": "(6)24", "title": "Driving Wrong Way / Wrong Side of Road", "classification": "Infraction", "fine": 200, "jail": 0, "statute": "F.S. § 316.081", "group": "Title VI"},
+    {"code": "(6)25", "title": "Improper Passing / Unsafe Lane Change", "classification": "Infraction", "fine": 150, "jail": 0, "statute": "F.S. §§ 316.083 / 316.085", "group": "Title VI"},
+    {"code": "(6)26", "title": "Illegal Window Tint / Equipment Violation", "classification": "Infraction", "fine": 100, "jail": 0, "statute": "F.S. § 316.2953", "group": "Title VI"},
+    {"code": "(6)27", "title": "Failure to Wear Seat Belt", "classification": "Infraction", "fine": 50, "jail": 0, "statute": "F.S. § 316.614", "group": "Title VI"},
+    {"code": "(7)01", "title": "Unlawful Carrying of a Concealed Firearm (Prohibited Person / Restricted Area)", "classification": "Felony 3rd", "fine": 1500, "jail": 120, "statute": "F.S. § 790.01", "group": "Title VII"},
+    {"code": "(7)02", "title": "Carrying a Concealed Weapon (Non-Firearm)", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 790.01(1)", "group": "Title VII"},
+    {"code": "(7)03", "title": "Improper Exhibition of a Firearm or Weapon", "classification": "Misd. 1st", "fine": 750, "jail": 60, "statute": "F.S. § 790.10", "group": "Title VII"},
+    {"code": "(7)04", "title": "Discharging a Firearm in Public or Residential Area", "classification": "Misd. 1st", "fine": 750, "jail": 60, "statute": "F.S. § 790.15(1)", "group": "Title VII"},
+    {"code": "(7)05", "title": "Discharging a Firearm from a Vehicle", "classification": "Felony 2nd", "fine": 2500, "jail": 240, "statute": "F.S. § 790.15(2)", "group": "Title VII"},
+    {"code": "(7)06", "title": "Shooting Into a Building, Vehicle, or Vessel", "classification": "Felony 2nd", "fine": 2500, "jail": 240, "statute": "F.S. § 790.19", "group": "Title VII"},
+    {"code": "(7)07", "title": "Possession of a Firearm by a Convicted Felon", "classification": "Felony 2nd", "fine": 2500, "jail": 240, "statute": "F.S. § 790.23", "group": "Title VII"},
+    {"code": "(7)08", "title": "Possession of Short-Barreled Rifle / Shotgun / Machine Gun", "classification": "Felony 2nd", "fine": 2000, "jail": 180, "statute": "F.S. § 790.221", "group": "Title VII"},
+    {"code": "(7)09", "title": "Possession of a Firearm on School Property", "classification": "Felony 3rd", "fine": 1500, "jail": 120, "statute": "F.S. § 790.115", "group": "Title VII"},
+    {"code": "(7)10", "title": "Minor in Possession of a Firearm", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 790.22", "group": "Title VII"},
+    {"code": "(7)11", "title": "Use of a Firearm While Under the Influence", "classification": "Misd. 2nd", "fine": 500, "jail": 30, "statute": "F.S. § 790.151", "group": "Title VII"},
+    {"code": "(7)12", "title": "Possession / Sale of Firearm with Altered Serial Number", "classification": "Felony 3rd", "fine": 1250, "jail": 120, "statute": "F.S. § 790.27", "group": "Title VII"},
+    {"code": "(7)13", "title": "Armed Criminal Action (10-20-Life Enhancement)", "classification": "Enhancement", "fine": 1000, "jail": 120, "statute": "F.S. § 775.087", "group": "Title VII", "note": "Enhancement — adds +$1,000 / +120s to an underlying charge, never booked alone"},
+    {"code": "(8)01", "title": "Indecent Exposure", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 800.03", "group": "Title VIII"},
+    {"code": "(8)02", "title": "Prostitution / Solicitation", "classification": "Misd. 2nd", "fine": 300, "jail": 20, "statute": "F.S. § 796.07", "group": "Title VIII"},
+    {"code": "(8)03", "title": "Unlawful Gambling", "classification": "Misd. 2nd", "fine": 250, "jail": 15, "statute": "F.S. § 849.08", "group": "Title VIII"},
+    {"code": "(8)04", "title": "Contributing to the Delinquency of a Minor", "classification": "Misd. 1st", "fine": 500, "jail": 45, "statute": "F.S. § 827.04", "group": "Title VIII"},
+    {"code": "(8)05", "title": "Criminal Attempt", "classification": "Varies", "fine": 0, "jail": 0, "statute": "F.S. § 777.04(1)", "group": "Title VIII", "note": "Varies — booked one degree below the underlying offense"},
+    {"code": "(8)06", "title": "Criminal Conspiracy", "classification": "Varies", "fine": 0, "jail": 0, "statute": "F.S. § 777.04(3)", "group": "Title VIII", "note": "Varies — booked one degree below the underlying offense"},
+    {"code": "(8)07", "title": "Criminal Solicitation", "classification": "Varies", "fine": 0, "jail": 0, "statute": "F.S. § 777.04(2)", "group": "Title VIII", "note": "Varies — booked one degree below the underlying offense"},
+    {"code": "(8)08", "title": "Aiding & Abetting (Principal in First Degree)", "classification": "Varies", "fine": 0, "jail": 0, "statute": "F.S. § 777.011", "group": "Title VIII", "note": "Varies — booked one degree below the underlying offense"},
+    {"code": "(8)09", "title": "Accessory After the Fact", "classification": "Felony 3rd", "fine": 1000, "jail": 90, "statute": "F.S. § 777.03", "group": "Title VIII"},
 ]
 PENAL_BY_CODE = {c["code"]: c for c in PENAL_CODES}
 
 
+JAIL_CAP_SECONDS = 900  # Sentencing Guide: stacked jail caps at 900 seconds
+
+
 def charge_totals(codes: list[str]) -> tuple[int, int, str]:
-    """(total fine, suggested jail minutes, highest classification) for charge codes."""
+    """(total fine, total jail seconds — capped at 900, lead classification).
+
+    Per the Sentencing Guide: charges stack, jail caps at 900s total, and
+    the most serious offense (highest class rank) leads the booking."""
     fine = sum(PENAL_BY_CODE[c]["fine"] for c in codes)
-    jail = sum(PENAL_BY_CODE[c]["jail"] for c in codes)
-    top = max((PENAL_BY_CODE[c]["classification"] for c in codes), key=lambda cl: CLASS_RANK[cl])
-    return fine, jail, top
+    jail = min(sum(PENAL_BY_CODE[c]["jail"] for c in codes), JAIL_CAP_SECONDS)
+    lead = max(codes, key=lambda c: CLASS_RANK[PENAL_BY_CODE[c]["classification"]])
+    return fine, jail, PENAL_BY_CODE[lead]["classification"]
 
 
 def charge_lines(codes: list[str]) -> str:
@@ -1223,16 +1385,22 @@ def charge_lines(codes: list[str]) -> str:
     for c in codes:
         ch = PENAL_BY_CODE[c]
         emoji = CLASS_EMOJI[ch["classification"]]
-        jail = f" • {ch['jail']} min jail" if ch["jail"] else ""
+        jail = f" • {ch['jail']}s jail" if ch["jail"] else ""
+        fine = f"${ch['fine']:,}" if ch["fine"] else "—"
+        note = f"\n*{ch['note']}*" if ch.get("note") else ""
+        statute = f" • {ch['statute']}" if ch.get("statute") else ""
         lines.append(
             f"{emoji} **{ch['code']} — {ch['title']}**\n"
-            f"{ch['classification']} • ${ch['fine']:,}{jail}"
+            f"{ch['classification']} • {fine}{jail}{statute}{note}"
         )
     return "\n".join(lines)
 
 
 class ChargeSelectView(discord.ui.View):
     """Ephemeral charge picker shown to the officer after /arrest or /cite."""
+
+    PAGE_SIZE = 24  # Discord caps a select menu at 25 options; 161 charges = 7 pages
+    MAX_CHARGES = 20
 
     def __init__(
         self,
@@ -1250,23 +1418,73 @@ class ChargeSelectView(discord.ui.View):
         self.jail_time = jail_time
         self.notes = notes
         self.selected: list[str] = []
-        select = discord.ui.Select(
-            placeholder="Select charges from the penal code (up to 15)…",
+        self.page = 0
+        self.pages = (len(PENAL_CODES) + self.PAGE_SIZE - 1) // self.PAGE_SIZE
+
+        self.select = discord.ui.Select(
+            placeholder="Add charges…",
             min_values=1,
-            max_values=15,
+            max_values=self.PAGE_SIZE,
             custom_id="scrs_charge_select",
-            options=[
-                discord.SelectOption(
-                    label=f"{c['code']} — {c['title']}"[:100],
-                    value=c["code"],
-                    description=f"{c['classification']} • ${c['fine']:,}"[:100],
-                    emoji=CLASS_EMOJI[c["classification"]],
-                )
-                for c in PENAL_CODES
-            ],
+            options=self._page_options(),
         )
-        select.callback = self._on_select
-        self.add_item(select)
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+        self.prev_btn = discord.ui.Button(label="◀ Prev", style=discord.ButtonStyle.secondary, custom_id="scrs_pg_prev", row=1)
+        self.prev_btn.callback = self._prev
+        self.add_item(self.prev_btn)
+        self.next_btn = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary, custom_id="scrs_pg_next", row=1)
+        self.next_btn.callback = self._next
+        self.add_item(self.next_btn)
+        self.clear_btn = discord.ui.Button(label="Clear", emoji="🗑️", style=discord.ButtonStyle.secondary, custom_id="scrs_pg_clear", row=1)
+        self.clear_btn.callback = self._clear
+        self.add_item(self.clear_btn)
+        self.confirm_btn = discord.ui.Button(label="Confirm (0)", emoji="✅", style=discord.ButtonStyle.success, custom_id="scrs_pg_confirm", row=2)
+        self.confirm_btn.callback = self._do_confirm
+        self.add_item(self.confirm_btn)
+        self.cancel_btn = discord.ui.Button(label="Cancel", emoji="✖️", style=discord.ButtonStyle.danger, custom_id="scrs_pg_cancel", row=2)
+        self.cancel_btn.callback = self._do_cancel
+        self.add_item(self.cancel_btn)
+        self._sync_components()
+
+    def _page_options(self) -> list[discord.SelectOption]:
+        items = PENAL_CODES[self.page * self.PAGE_SIZE : (self.page + 1) * self.PAGE_SIZE]
+        return [
+            discord.SelectOption(
+                label=f"{c['code']} — {c['title']}"[:100],
+                value=c["code"],
+                description=f"{c['classification']} • ${c['fine']:,} • {c['jail']}s"[:100],
+                emoji=CLASS_EMOJI[c["classification"]],
+            )
+            for c in items
+        ]
+
+    def _sync_components(self) -> None:
+        items = PENAL_CODES[self.page * self.PAGE_SIZE : (self.page + 1) * self.PAGE_SIZE]
+        self.select.options = self._page_options()
+        self.select.placeholder = (
+            f"Add charges — page {self.page + 1} of {self.pages} ({items[0]['group'] if items else ''})…"
+        )
+        self.prev_btn.disabled = self.page == 0
+        self.next_btn.disabled = self.page >= self.pages - 1
+        self.confirm_btn.label = f"Confirm ({len(self.selected)})"
+
+    def summary_text(self) -> str:
+        if not self.selected:
+            return (
+                f"🚔 **{self.kind.capitalize()} — {self.suspect.display_name}**\n"
+                "No charges yet. Pick charges in the dropdown to **add** them (all 161 are in the book — "
+                "flip pages with ◀ ▶), then press **Confirm**."
+            )
+        fine, jail, top = charge_totals(self.selected)
+        names = "\n".join(f"• {c} — {PENAL_BY_CODE[c]['title']}" for c in self.selected)
+        return (
+            f"🚔 **{self.kind.capitalize()} — {self.suspect.display_name}**\n"
+            f"**{len(self.selected)} charge(s) selected:**\n{names}\n\n"
+            f"Total fine **${fine:,}** • Jail **{jail}s** (stacked, cap 900s) • Lead classification **{top}**\n"
+            "Add more charges, 🗑 Clear to start over, or ✅ Confirm to issue."
+        )
 
     async def _guard(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.officer.id:
@@ -1274,22 +1492,37 @@ class ChargeSelectView(discord.ui.View):
             return False
         return True
 
+    async def _refresh(self, interaction: discord.Interaction) -> None:
+        self._sync_components()
+        await interaction.response.edit_message(content=self.summary_text(), embed=None, view=self)
+
     async def _on_select(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
-        self.selected = list(interaction.data.get("values", []))  # type: ignore[attr-defined]
-        fine, jail, top = charge_totals(self.selected)
-        await interaction.response.edit_message(
-            content=(
-                f"**{len(self.selected)} charge(s) selected** — total fine **${fine:,}**, "
-                f"suggested jail **{jail} min**, highest classification **{top}**. "
-                "Press Confirm to issue."
-            ),
-            view=self,
-        )
+        for code in list(interaction.data.get("values", [])):  # type: ignore[attr-defined]
+            if code not in self.selected and len(self.selected) < self.MAX_CHARGES:
+                self.selected.append(code)
+        await self._refresh(interaction)
 
-    @discord.ui.button(label="Confirm", emoji="✅", style=discord.ButtonStyle.success)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def _prev(self, interaction: discord.Interaction) -> None:
+        if not await self._guard(interaction):
+            return
+        self.page = max(0, self.page - 1)
+        await self._refresh(interaction)
+
+    async def _next(self, interaction: discord.Interaction) -> None:
+        if not await self._guard(interaction):
+            return
+        self.page = min(self.pages - 1, self.page + 1)
+        await self._refresh(interaction)
+
+    async def _clear(self, interaction: discord.Interaction) -> None:
+        if not await self._guard(interaction):
+            return
+        self.selected = []
+        await self._refresh(interaction)
+
+    async def _do_confirm(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
         if not self.selected:
@@ -1326,7 +1559,7 @@ class ChargeSelectView(discord.ui.View):
             embed.add_field(name="Total fine", value=f"${fine:,}", inline=True)
             embed.add_field(
                 name="Jail time",
-                value=f"{jail_final} min" + ("" if self.jail_time is not None else f" (book suggestion: {suggested_jail} min)"),
+                value=f"{jail_final}s" + ("" if self.jail_time is not None else f" (book total: {suggested_jail}s, cap 900s)"),
                 inline=True,
             )
             if self.notes:
@@ -1372,42 +1605,33 @@ class ChargeSelectView(discord.ui.View):
         await safe_dm(self.suspect, embed)
         self.stop()
 
-    @discord.ui.button(label="Cancel", emoji="✖️", style=discord.ButtonStyle.danger)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def _do_cancel(self, interaction: discord.Interaction) -> None:
         if not await self._guard(interaction):
             return
         await interaction.response.edit_message(content="Cancelled — nothing was issued.", embed=None, view=None)
         self.stop()
 
 
-@bot.tree.command(name="arrest", description="Arrest a suspect: pick charges from the penal code (up to 15 at once)")
+@bot.tree.command(name="arrest", description="Arrest a suspect: pick charges from the official penal code (161 charges)")
 @leo_only()
 @app_commands.describe(
     suspect="The suspect being arrested",
-    jail_time="Jail time in minutes (leave blank to use the penal code's suggested total)",
+    jail_time="Jail time in SECONDS (leave blank to use the book's stacked total, cap 900s)",
     notes="Optional officer notes",
 )
 async def arrest(
     interaction: discord.Interaction,
     suspect: discord.Member,
-    jail_time: app_commands.Range[int, 0, 600] | None = None,
+    jail_time: app_commands.Range[int, 0, 900] | None = None,
     notes: str | None = None,
 ) -> None:
     view = ChargeSelectView(
         kind="arrest", officer=interaction.user, suspect=suspect, jail_time=jail_time, notes=notes
     )
-    await interaction.response.send_message(
-        embed=base_embed(
-            f"🚔 Arrest — {suspect.display_name}",
-            COLOUR_ALERT,
-            "Pick the charges from the penal code below (you can select up to 15), then press **Confirm**.",
-        ),
-        view=view,
-        ephemeral=True,
-    )
+    await interaction.response.send_message(content=view.summary_text(), view=view, ephemeral=True)
 
 
-@bot.tree.command(name="cite", description="Cite a suspect: pick charges from the penal code (up to 15 at once)")
+@bot.tree.command(name="cite", description="Cite a suspect: pick charges from the official penal code (161 charges)")
 @leo_only()
 @app_commands.describe(suspect="The person being cited", notes="Optional officer notes")
 async def cite(
@@ -1416,15 +1640,7 @@ async def cite(
     notes: str | None = None,
 ) -> None:
     view = ChargeSelectView(kind="cite", officer=interaction.user, suspect=suspect, notes=notes)
-    await interaction.response.send_message(
-        embed=base_embed(
-            f"🎫 Citation — {suspect.display_name}",
-            COLOUR_STAFF,
-            "Pick the charges from the penal code below (you can select up to 15), then press **Confirm**.",
-        ),
-        view=view,
-        ephemeral=True,
-    )
+    await interaction.response.send_message(content=view.summary_text(), view=view, ephemeral=True)
 
 
 async def _purge_bot_session_messages(channel: discord.TextChannel, keep_first_overall: bool = False) -> int:
@@ -2471,6 +2687,166 @@ async def voiceleave(interaction: discord.Interaction) -> None:
     await _end_voice_session(interaction.guild.id)
     await voice_log(interaction.guild, f"Voice session ended by {interaction.user}.")
     await interaction.response.send_message("🎙️ Voice assistant off — left the channel.", ephemeral=True)
+
+
+# --------------------------------------------------------------------------- #
+# Assistant chatbot (Groq) — dedicated channel + /ask
+#
+# A channel where members just talk to the bot (default: the channel Hamza
+# created, override with ASSISTANT_CHANNEL_ID). Replies use the same Groq
+# LLM as the voice assistant, with short per-channel memory, and the bot is
+# penal-code aware: when a message mentions a charge (by code like (1)13 or
+# by name), that charge's official data is injected as context.
+# --------------------------------------------------------------------------- #
+
+import collections
+
+ASSISTANT_CHANNEL_ID = int(os.getenv("ASSISTANT_CHANNEL_ID", "1566062426871304292"))
+ASSISTANT_SYSTEM = (
+    "You are SCRS Assistant, the friendly AI helper for the Sunshine Coast Roleplay Server (SCRS), "
+    "a Roblox / Southwest Florida roleplay community. Answer concisely and helpfully in plain language, "
+    "in at most a short paragraph or a few bullet points. "
+    "The server uses a Florida-based penal code: charges have codes like (1)13, classes from Infraction, "
+    "Misdemeanor 2nd/1st, Felony 3rd/2nd/1st, up to Capital; fines are in dollars and jail time is in "
+    "SECONDS (charges stack, total jail caps at 900 seconds, and the most serious charge leads the booking). "
+    "If CHARGE DATA is provided with the conversation, treat it as the authority for penal-code questions. "
+    "Never invent penal codes, fines, jail times, or server rules you were not given — if you don't know, say so."
+)
+_assistant_history: dict[int, collections.deque] = {}
+_assistant_cooldown: dict[int, float] = {}
+_assistant_warned_at: float = 0.0
+
+
+def _penal_context(text: str) -> str:
+    """Official charge rows relevant to a message (by code or charge name)."""
+    hits: list[dict] = []
+    for code in re.findall(r"\(\d+\)\d+", text):
+        if code in PENAL_BY_CODE and PENAL_BY_CODE[code] not in hits:
+            hits.append(PENAL_BY_CODE[code])
+    lowered = text.lower()
+    for c in PENAL_CODES:
+        if len(hits) >= 6:
+            break
+        title = c["title"].lower()
+        if len(title) >= 6 and title in lowered and c not in hits:
+            hits.append(c)
+    if not hits:
+        return ""
+    lines = [
+        f"{c['code']} — {c['title']}: {c['classification']}, ${c['fine']:,} fine, {c['jail']}s jail ({c['statute']})"
+        for c in hits
+    ]
+    return "CHARGE DATA (official SCRS penal code):\n" + "\n".join(lines)
+
+
+async def groq_chat(messages: list[dict]) -> str:
+    """Plain chat completion via Groq (no tools). Returns '' on any failure."""
+    if aiohttp is None or not GROQ_API_KEY:
+        return ""
+    payload = {"model": GROQ_LLM_MODEL, "messages": messages, "temperature": 0.4}
+    try:
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                f"{GROQ_BASE}/chat/completions",
+                headers={**_groq_headers(), "Content-Type": "application/json"},
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=45),
+            ) as resp:
+                if resp.status != 200:
+                    print(f"[SCRS] Groq chat error {resp.status}: {(await resp.text())[:200]}", file=sys.stderr)
+                    return ""
+                data = await resp.json()
+        return str(data["choices"][0]["message"].get("content") or "").strip()
+    except Exception as exc:
+        print(f"[SCRS] Groq chat failed: {exc}", file=sys.stderr)
+        return ""
+
+
+def _discord_chunks(text: str, limit: int = 1990) -> list[str]:
+    text = text.strip()
+    if len(text) <= limit:
+        return [text] if text else []
+    chunks, current = [], ""
+    for word in text.split(" "):
+        if len(current) + len(word) + 1 <= limit:
+            current = f"{current} {word}".strip()
+        else:
+            if current:
+                chunks.append(current)
+            current = word[:limit]
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+@bot.event
+async def on_message(message: discord.Message) -> None:
+    try:
+        if (
+            message.guild is not None
+            and message.channel.id == ASSISTANT_CHANNEL_ID
+            and not message.author.bot
+        ):
+            await _assistant_handle(message)
+    finally:
+        await bot.process_commands(message)
+
+
+async def _assistant_handle(message: discord.Message) -> None:
+    global _assistant_warned_at
+    content = message.content.strip()
+    if not content or content.startswith("/"):
+        return
+    if not GROQ_API_KEY:
+        if time.time() - _assistant_warned_at > 600:
+            _assistant_warned_at = time.time()
+            await message.channel.send("⚠️ The assistant isn't switched on yet — `GROQ_API_KEY` is missing from the bot's configuration.")
+        return
+    now = time.time()
+    if now - _assistant_cooldown.get(message.author.id, 0) < 4:
+        return
+    _assistant_cooldown[message.author.id] = now
+
+    history = _assistant_history.setdefault(message.channel.id, collections.deque(maxlen=14))
+    context = _penal_context(content)
+    system = ASSISTANT_SYSTEM + (f"\n\n{context}" if context else "")
+    messages = [{"role": "system", "content": system}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": f"{message.author.display_name}: {content}"})
+    async with message.channel.typing():
+        reply = await groq_chat(messages)
+    if not reply:
+        await message.channel.send("🤔 I couldn't get an answer just now — try again in a moment.")
+        return
+    history.append({"role": "user", "content": f"{message.author.display_name}: {content}"})
+    history.append({"role": "assistant", "content": reply})
+    for chunk in _discord_chunks(reply):
+        await message.channel.send(chunk)
+
+
+@bot.tree.command(name="ask", description="Ask the SCRS assistant a question (Groq AI)")
+@app_commands.describe(question="Your question")
+async def ask(interaction: discord.Interaction, question: str) -> None:
+    if not GROQ_API_KEY:
+        await interaction.response.send_message("⚠️ The assistant isn't switched on yet — `GROQ_API_KEY` is missing from the bot's configuration.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    context = _penal_context(question)
+    system = ASSISTANT_SYSTEM + (f"\n\n{context}" if context else "")
+    reply = await groq_chat(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": question},
+        ]
+    )
+    if not reply:
+        await interaction.followup.send("🤔 I couldn't get an answer just now — try again in a moment.")
+        return
+    chunks = _discord_chunks(reply)
+    await interaction.followup.send(f"💬 **{interaction.user.display_name} asked:** {question[:280]}\n\n{chunks[0]}")
+    for extra in chunks[1:]:
+        if interaction.channel:
+            await interaction.channel.send(extra)
 
 
 # --------------------------------------------------------------------------- #
