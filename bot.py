@@ -69,6 +69,10 @@ LOG_CHANNEL_NAME = "punishment-logs"
 ADJUSTMENTS_CHANNEL_NAME = "staff-adjustments"
 SPECIAL_RP_CHANNEL_NAME = "special-rp-request"
 BOT_LOGS_CHANNEL_ID = int(os.getenv("BOT_LOGS_CHANNEL_ID", "1565320716130455562"))
+# 911 flow: civilians place calls with /911 in the request channel; the call
+# (with the service role ping) is posted in the dispatch channel.
+NINE_ONE_ONE_REQUEST_CHANNEL_ID = int(os.getenv("NINE_ONE_ONE_REQUEST_CHANNEL_ID", "1564722104274784297"))
+NINE_ONE_ONE_POST_CHANNEL_ID = int(os.getenv("NINE_ONE_ONE_POST_CHANNEL_ID", "1566086271875424329"))
 
 # Special roleplay types — chosen from the dropdown in /specialrpreq.
 # Edit this list to change what shows in the dropdown.
@@ -2031,6 +2035,15 @@ async def nine_one_one(
     situation: str,
 ) -> None:
     guild = interaction.guild
+    # Calls are placed from the 911 request channel only (admins bypass for
+    # testing); the call itself is posted in the dispatch channel.
+    is_admin = bool(interaction.user.guild_permissions and interaction.user.guild_permissions.administrator)
+    if interaction.channel_id != NINE_ONE_ONE_REQUEST_CHANNEL_ID and not is_admin:
+        await interaction.response.send_message(
+            f"📞 911 calls can only be placed in <#{NINE_ONE_ONE_REQUEST_CHANNEL_ID}>.",
+            ephemeral=True,
+        )
+        return
     chosen = (
         ["police", "sheriff", "fire"] if service.value == "all" else [service.value]
     )
@@ -2063,7 +2076,7 @@ async def nine_one_one(
     )
     embed.add_field(name="Status", value="⏳ Awaiting a unit — press **Responding** below if you're en route.", inline=False)
 
-    target = find_channel(guild, "911") or interaction.channel
+    target = guild.get_channel(NINE_ONE_ONE_POST_CHANNEL_ID) or find_channel(guild, "911") or interaction.channel
     content = " ".join(role.mention for role in ping_roles) or None
     await target.send(content=content, embed=embed, view=NineOneOneView())
     await interaction.response.send_message(
