@@ -2096,6 +2096,7 @@ async def nine_one_one(
 
 import asyncio
 import io
+import struct
 import wave
 
 try:
@@ -2402,31 +2403,63 @@ def _speakable(text: str) -> str:
 
 def _merge_wavs(parts: list[bytes]) -> bytes | None:
     """Concatenate same-format WAV byte strings into one WAV, or None if
-    the parts' formats differ (caller then plays them back-to-back)."""
+    the parts' formats differ (caller then plays them back-to-back).
+
+    Built at the byte level with an explicit header: Groq's TTS WAVs are
+    streamed (their size fields are placeholders), and re-writing them via
+    the wave module produced files FFmpeg rejected as corrupt — so the PCM
+    frames are read in a loop (never trusting the declared frame count) and
+    the merged header's sizes are computed from the actual bytes."""
     try:
         params = None
-        frames = []
+        pcm_parts: list[bytes] = []
         for part in parts:
             with wave.open(io.BytesIO(part), "rb") as w:
+                sig = (w.getnchannels(), w.getsampwidth(), w.getframerate())
                 if params is None:
-                    params = w.getparams()
-                elif (w.getnchannels(), w.getsampwidth(), w.getframerate()) != (
-                    params.nchannels,
-                    params.sampwidth,
-                    params.framerate,
-                ):
+                    params = sig
+                elif sig != params:
                     return None
-                frames.append(w.readframes(w.getnframes()))
-        out = io.BytesIO()
-        with wave.open(out, "wb") as w:
-            w.setnchannels(params.nchannels)
-            w.setsampwidth(params.sampwidth)
-            w.setframerate(params.framerate)
-            for f in frames:
-                w.writeframes(f)
-        return out.getvalue()
+                while True:
+                    frames = w.readframes(65536)
+                    if not frames:
+                        break
+                    pcm_parts.append(frames)
+        nchannels, sampwidth, framerate = params
+        pcm = b"".join(pcm_parts)
+        block_align = nchannels * sampwidth
+        header = (
+            b"RIFF"
+            + struct.pack("<I", 36 + len(pcm))
+            + b"WAVE"
+            + b"fmt "
+            + struct.pack(
+                "<IHHIIHH",
+                16,  # fmt chunk size
+                1,  # PCM
+                nchannels,
+                framerate,
+                framerate * block_align,  # byte rate
+                block_align,
+                sampwidth * 8,  # bits per sample
+            )
+            + b"data"
+            + struct.pack("<I", len(pcm))
+        )
+        merged = header + pcm
+        assert len(merged) == 44 + len(pcm)
+        return merged
     except Exception:
         return None
+
+
+def _wav_seconds(data: bytes) -> float:
+    """Duration of a WAV in seconds (0 if unreadable)."""
+    try:
+        with wave.open(io.BytesIO(data), "rb") as w:
+            return w.getnframes() / float(w.getframerate())
+    except Exception:
+        return 0.0
 
 
 async def _speak(session: dict, text: str) -> None:
@@ -2463,7 +2496,18 @@ async def _speak(session: dict, text: str) -> None:
                 if not vc.is_connected():
                     return
                 vc.play(discord.FFmpegPCMAudio(path))
+                # Watchdog: never wait on playback longer than the audio
+                # actually is (+ grace) — a bad stream once wedged the
+                # session by reporting "playing" indefinitely.
+                deadline = time.time() + (_wav_seconds(wav_bytes) or 30.0) + 10.0
                 while vc.is_playing():
+                    if time.time() > deadline:
+                        try:
+                            vc.stop()
+                        except Exception:
+                            pass
+                        print("[SCRS] Playback watchdog: stopped over-long playback", file=sys.stderr)
+                        break
                     await asyncio.sleep(0.2)
             except Exception as exc:
                 print(f"[SCRS] Voice playback error: {exc}", file=sys.stderr)
