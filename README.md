@@ -22,6 +22,8 @@ Custom Discord bot for the **Sunshine Coast Roleplay Server (SCRS)** — a Roblo
 | `/setup [join info]` | Staff Team | Step-by-step how-to-join embed. |
 | `/warrant <user> <reason>` | Staff Team | Puts an **active warrant** on the user (shows on their profile), DMs them, logs to #punishment-logs. |
 | `/ticket <user> <reason> <penal code> <amount>` | Staff Team | Issues a **ticket/citation** to a user: Reason / Penal Code / Amount ($). Stored on their profile, DMs them. *(This is a citation, not a support ticket — the server uses Tickety for support tickets.)* |
+| `/arrest <suspect> [jail time] [notes]` | Law Enforcement | Opens a private charge picker: the officer selects **up to 15 charges at once** from the built-in **penal code book** (20 charges, each with classification — Infraction / Misdemeanor / Felony / Second-Degree Felony / First-Degree Felony — fine, and suggested jail time). Jail time is officer-selected (blank = book total). Posts a public arrest record showing every charge with its classification and severity, and **DMs it to the suspect**. Saved on the suspect's profile (Arrests tab). |
+| `/cite <suspect> [notes]` | Law Enforcement | Same penal-code charge picker as /arrest, but issues a **citation**: total fine, no jail. Counts with the user's citations/tickets on their profile, and DMs them the breakdown. |
 | `/profile [user]` | Civilian | Profile with a **dropdown**: Overview / Tickets / Registered Cars / Warrants, plus registration (Verified/Bloxlink), roles, infractions and strikes. |
 | `/registercar <car name> <color> <plate>` | Civilian | Registers a car to you. Plates are unique server-wide. |
 | `/unregistercar <plate>` | Civilian | Removes your car with that plate. |
@@ -61,4 +63,4 @@ python bot.py
 
 ## Data
 
-Everything persists in `data/store.json`: infractions, strikes, citations (tickets), registered cars, warrants. Delete it (while the bot is stopped) to reset counters/records.
+Everything persists in `data/store.json`: infractions, strikes, citations (tickets), arrests, registered cars, warrants, special RP requests. Delete it (while the bot is stopped) to reset counters/records.

@@ -128,6 +128,7 @@ STORE_DEFAULTS = {
     "infractions": {},   # user_id -> [ {by, reason, proof, level, at} ]
     "strikes": {},       # user_id -> [ {by, reason, proof, level, at} ]
     "citations": {},     # user_id -> [ {by, reason, penal_code, amount, at} ]
+    "arrests": {},       # user_id -> [ {by, charges: [codes], fine, jail, top_class, notes, at} ]
     "cars": {},          # user_id -> [ {car_name, color, plate, at} ]
     "warrants": {},      # user_id -> [ {by, reason, at, active} ]
     "special_rp_requests": [],  # [ {requester, type, details, status, at, decided_by} ]
@@ -309,6 +310,22 @@ high_rank_only = lambda: check_group(HIGH_RANK_ROLES, "High Rank")
 staff_only = lambda: check_group(STAFF_ROLES, "Staff Team")
 civilian_only = lambda: check_group(CIVILIAN_ROLES, "Civilian")
 
+# Law-enforcement gate for /arrest and /cite: the emergency-service roles,
+# plus Staff and High Rank (admins bypass as usual).
+LEO_ROLES = {
+    "Emergency Services",
+    "Sarasota Police Department",
+    "Sarasota County",
+    "Sarasota Fire Department",
+    "Police",
+    "Police Department",
+    "Sheriff",
+    "Sheriff's Office",
+    "Fire Department",
+}
+LEO_GATE = HIGH_RANK_ROLES | STAFF_ROLES | LEO_ROLES
+leo_only = lambda: check_group(LEO_GATE, "Law Enforcement")
+
 
 # --------------------------------------------------------------------------- #
 # Interactive views
@@ -369,6 +386,7 @@ def profile_embed(member: discord.Member, section: str = "overview") -> discord.
     infractions = store["infractions"].get(uid, [])
     strikes = store["strikes"].get(uid, [])
     citations = store["citations"].get(uid, [])
+    arrests = store.get("arrests", {}).get(uid, [])
     cars = store["cars"].get(uid, [])
     warrants = active_warrants(member.id)
 
@@ -377,6 +395,7 @@ def profile_embed(member: discord.Member, section: str = "overview") -> discord.
         "tickets": f"🎫 Tickets — {member.display_name}",
         "cars": f"🚗 Registered Cars — {member.display_name}",
         "warrants": f"📜 Warrants — {member.display_name}",
+        "arrests": f"🚔 Arrests — {member.display_name}",
     }
     embed = base_embed(titles.get(section, titles["overview"]), COLOUR_MAIN)
     embed.set_thumbnail(url=member.display_avatar.url)
@@ -407,6 +426,21 @@ def profile_embed(member: discord.Member, section: str = "overview") -> discord.
             ]
             embed.description = "\n".join(lines[:15])
             embed.add_field(name="Cars registered", value=str(len(cars)), inline=True)
+    elif section == "arrests":
+        if not arrests:
+            embed.description = "No arrests on record. ✅"
+        else:
+            lines = []
+            for i, a in enumerate(reversed(arrests), 1):
+                when = str(a.get("at", ""))[:10]
+                codes = ", ".join(a.get("charges", []))
+                lines.append(
+                    f"**#{len(arrests) - i + 1}** — {when} • {a.get('top_class', '—')} • "
+                    f"Fine ${int(a.get('fine', 0)):,} • Jail {int(a.get('jail', 0))} min\n"
+                    f"Charges: {codes}"
+                )
+            embed.description = "\n\n".join(lines[:10])
+            embed.add_field(name="Total arrests", value=str(len(arrests)), inline=True)
     elif section == "warrants":
         if not warrants:
             embed.description = "No active warrants. ✅"
@@ -432,6 +466,7 @@ def profile_embed(member: discord.Member, section: str = "overview") -> discord.
             inline=True,
         )
         embed.add_field(name="Tickets", value=str(len(citations)), inline=True)
+        embed.add_field(name="Arrests", value=str(len(arrests)), inline=True)
         embed.add_field(name="Registered Cars", value=str(len(cars)), inline=True)
         embed.add_field(name="Active Warrants", value=str(len(warrants)), inline=True)
         embed.add_field(name="Infractions", value=str(len(infractions)), inline=True)
@@ -454,6 +489,7 @@ class ProfileView(discord.ui.View):
             discord.SelectOption(label="Tickets", value="tickets", emoji="🎫"),
             discord.SelectOption(label="Registered Cars", value="cars", emoji="🚗"),
             discord.SelectOption(label="Warrants", value="warrants", emoji="📜"),
+            discord.SelectOption(label="Arrests", value="arrests", emoji="🚔"),
         ],
     )
     async def select_section(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
@@ -546,6 +582,50 @@ async def ping(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=embed)
 
 
+@bot.tree.command(name="sysinfo", description="Diagnostics: Python / FFmpeg / Opus / PyNaCl (voice feature readiness)")
+@high_rank_only()
+async def sysinfo(interaction: discord.Interaction) -> None:
+    """Reports whether this host can support voice playback (for the 911
+    voice-dispatch feature): FFmpeg binary, libopus, and PyNaCl."""
+    import platform
+    import shutil
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    opus_loaded = discord.opus.is_loaded()
+    opus_detail = "loaded"
+    if not opus_loaded:
+        opus_detail = "not loaded"
+        for lib in ("libopus.so.0", "libopus.so", "libopus", "opus"):
+            try:
+                discord.opus.load_opus(lib)
+                if discord.opus.is_loaded():
+                    opus_loaded = True
+                    opus_detail = f"loaded via {lib}"
+                    break
+            except Exception:
+                continue
+    try:
+        import nacl  # noqa: F401
+
+        nacl_ok = True
+    except Exception:
+        nacl_ok = False
+
+    voice_ready = bool(ffmpeg_path) and opus_loaded and nacl_ok
+    embed = base_embed("🖥️ System Info — SCRS Bot Host", COLOUR_INFO)
+    embed.add_field(name="Python", value=platform.python_version(), inline=True)
+    embed.add_field(name="discord.py", value=discord.__version__, inline=True)
+    embed.add_field(name="FFmpeg", value=ffmpeg_path or "❌ NOT FOUND", inline=True)
+    embed.add_field(name="libopus", value=("✅ " if opus_loaded else "❌ ") + opus_detail, inline=True)
+    embed.add_field(name="PyNaCl (voice)", value="✅ installed" if nacl_ok else "❌ missing", inline=True)
+    embed.add_field(
+        name="Voice dispatch ready?",
+        value="✅ YES — FFmpeg + opus + PyNaCl all present" if voice_ready else "❌ NO — see missing items above",
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="help", description="List all SCRS bot commands")
 async def help_command(interaction: discord.Interaction) -> None:
     embed = base_embed(
@@ -574,6 +654,7 @@ async def help_command(interaction: discord.Interaction) -> None:
             "`/sessionend` — end the session + clean up the session channels\n"
             "`/warrant` — put a warrant on a user\n"
             "`/ticket` — issue a ticket: Reason / Penal Code / Amount\n"
+            "`/arrest` / `/cite` — pick charges from the penal code (up to 15 at once) [Law Enforcement]\n"
             "`/specialrpreq` — request a special roleplay (dropdown) — Management accepts/denies in #special-rp-request"
         ),
         inline=False,
@@ -1066,6 +1147,275 @@ async def ticket(
     await interaction.response.send_message(embed=embed)
     await log_punishment(interaction.guild, embed)
     await safe_dm(user, embed)
+
+
+# --------------------------------------------------------------------------- #
+# Penal code book + /arrest + /cite  (requested by ehyugf6, Oct 30 2026)
+#
+# Officers pick charges from the penal code below — up to 15 at once — and
+# the bot works out the classification/severity, total fine and suggested
+# jail time from the book. On /arrest the officer can override the jail
+# time. The suspect is DM'd the full breakdown. Edit PENAL_CODES to match
+# the server's official penal code document.
+# --------------------------------------------------------------------------- #
+
+# classification -> severity rank (higher = more severe)
+CLASS_RANK = {
+    "Infraction": 1,
+    "Misdemeanor": 2,
+    "Felony": 3,
+    "Second-Degree Felony": 4,
+    "First-Degree Felony": 5,
+}
+CLASS_EMOJI = {
+    "Infraction": "🟢",
+    "Misdemeanor": "🟡",
+    "Felony": "🟠",
+    "Second-Degree Felony": "🔴",
+    "First-Degree Felony": "⚫",
+}
+
+# code, title, classification, fine $, suggested jail (minutes)
+PENAL_CODES: list[dict] = [
+    {"code": "PC-101", "title": "Speeding", "classification": "Infraction", "fine": 150, "jail": 0},
+    {"code": "PC-102", "title": "Disorderly Conduct", "classification": "Infraction", "fine": 75, "jail": 0},
+    {"code": "PC-103", "title": "Trespassing", "classification": "Infraction", "fine": 100, "jail": 0},
+    {"code": "PC-201", "title": "Reckless Driving", "classification": "Misdemeanor", "fine": 300, "jail": 5},
+    {"code": "PC-202", "title": "Resisting Arrest", "classification": "Misdemeanor", "fine": 250, "jail": 5},
+    {"code": "PC-203", "title": "Assault", "classification": "Misdemeanor", "fine": 400, "jail": 10},
+    {"code": "PC-204", "title": "Drug Possession", "classification": "Misdemeanor", "fine": 350, "jail": 10},
+    {"code": "PC-205", "title": "Obstruction of Justice", "classification": "Misdemeanor", "fine": 300, "jail": 8},
+    {"code": "PC-206", "title": "Vandalism", "classification": "Misdemeanor", "fine": 200, "jail": 5},
+    {"code": "PC-301", "title": "Evading a Law Enforcement Officer", "classification": "Felony", "fine": 750, "jail": 15},
+    {"code": "PC-302", "title": "Grand Theft Auto", "classification": "Felony", "fine": 800, "jail": 20},
+    {"code": "PC-303", "title": "Assault with a Deadly Weapon", "classification": "Felony", "fine": 1000, "jail": 25},
+    {"code": "PC-304", "title": "Possession of an Illegal Firearm", "classification": "Felony", "fine": 900, "jail": 20},
+    {"code": "PC-305", "title": "Drug Trafficking", "classification": "Felony", "fine": 1800, "jail": 35},
+    {"code": "PC-306", "title": "Bribery of an Officer", "classification": "Felony", "fine": 1200, "jail": 20},
+    {"code": "PC-401", "title": "Armed Robbery", "classification": "Second-Degree Felony", "fine": 1500, "jail": 30},
+    {"code": "PC-402", "title": "Attempted Murder", "classification": "Second-Degree Felony", "fine": 2000, "jail": 40},
+    {"code": "PC-403", "title": "Kidnapping", "classification": "Second-Degree Felony", "fine": 2500, "jail": 40},
+    {"code": "PC-501", "title": "Bank Robbery", "classification": "First-Degree Felony", "fine": 3000, "jail": 45},
+    {"code": "PC-502", "title": "Murder", "classification": "First-Degree Felony", "fine": 5000, "jail": 60},
+]
+PENAL_BY_CODE = {c["code"]: c for c in PENAL_CODES}
+
+
+def charge_totals(codes: list[str]) -> tuple[int, int, str]:
+    """(total fine, suggested jail minutes, highest classification) for charge codes."""
+    fine = sum(PENAL_BY_CODE[c]["fine"] for c in codes)
+    jail = sum(PENAL_BY_CODE[c]["jail"] for c in codes)
+    top = max((PENAL_BY_CODE[c]["classification"] for c in codes), key=lambda cl: CLASS_RANK[cl])
+    return fine, jail, top
+
+
+def charge_lines(codes: list[str]) -> str:
+    lines = []
+    for c in codes:
+        ch = PENAL_BY_CODE[c]
+        emoji = CLASS_EMOJI[ch["classification"]]
+        jail = f" • {ch['jail']} min jail" if ch["jail"] else ""
+        lines.append(
+            f"{emoji} **{ch['code']} — {ch['title']}**\n"
+            f"{ch['classification']} • ${ch['fine']:,}{jail}"
+        )
+    return "\n".join(lines)
+
+
+class ChargeSelectView(discord.ui.View):
+    """Ephemeral charge picker shown to the officer after /arrest or /cite."""
+
+    def __init__(
+        self,
+        *,
+        kind: str,
+        officer: discord.Member,
+        suspect: discord.Member,
+        jail_time: int | None = None,
+        notes: str | None = None,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.kind = kind  # "arrest" or "cite"
+        self.officer = officer
+        self.suspect = suspect
+        self.jail_time = jail_time
+        self.notes = notes
+        self.selected: list[str] = []
+        select = discord.ui.Select(
+            placeholder="Select charges from the penal code (up to 15)…",
+            min_values=1,
+            max_values=15,
+            custom_id="scrs_charge_select",
+            options=[
+                discord.SelectOption(
+                    label=f"{c['code']} — {c['title']}"[:100],
+                    value=c["code"],
+                    description=f"{c['classification']} • ${c['fine']:,}"[:100],
+                    emoji=CLASS_EMOJI[c["classification"]],
+                )
+                for c in PENAL_CODES
+            ],
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _guard(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.officer.id:
+            await interaction.response.send_message("Only the issuing officer can use this picker.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        if not await self._guard(interaction):
+            return
+        self.selected = list(interaction.data.get("values", []))  # type: ignore[attr-defined]
+        fine, jail, top = charge_totals(self.selected)
+        await interaction.response.edit_message(
+            content=(
+                f"**{len(self.selected)} charge(s) selected** — total fine **${fine:,}**, "
+                f"suggested jail **{jail} min**, highest classification **{top}**. "
+                "Press Confirm to issue."
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(label="Confirm", emoji="✅", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._guard(interaction):
+            return
+        if not self.selected:
+            await interaction.response.send_message("Pick at least one charge first.", ephemeral=True)
+            return
+        fine, suggested_jail, top = charge_totals(self.selected)
+        now = datetime.now(timezone.utc).isoformat()
+
+        if self.kind == "arrest":
+            jail_final = self.jail_time if self.jail_time is not None else suggested_jail
+            records = store["arrests"].setdefault(str(self.suspect.id), [])
+            records.append(
+                {
+                    "by": self.officer.id,
+                    "charges": list(self.selected),
+                    "fine": fine,
+                    "jail": jail_final,
+                    "top_class": top,
+                    "notes": self.notes or "",
+                    "at": now,
+                }
+            )
+            store["arrests"][str(self.suspect.id)] = records
+            save_store(store)
+
+            embed = base_embed("🚔 Arrest Record", COLOUR_ALERT)
+            embed.add_field(name="Suspect", value=f"{self.suspect.mention} ({self.suspect.display_name})", inline=False)
+            embed.add_field(name="Charges", value=charge_lines(self.selected), inline=False)
+            embed.add_field(
+                name="⚖️ Classification",
+                value=f"Highest severity: **{top}** ({len(self.selected)} charge{'s' if len(self.selected) != 1 else ''})",
+                inline=False,
+            )
+            embed.add_field(name="Total fine", value=f"${fine:,}", inline=True)
+            embed.add_field(
+                name="Jail time",
+                value=f"{jail_final} min" + ("" if self.jail_time is not None else f" (book suggestion: {suggested_jail} min)"),
+                inline=True,
+            )
+            if self.notes:
+                embed.add_field(name="Officer notes", value=self.notes, inline=False)
+            embed.add_field(name="Arresting officer", value=self.officer.mention, inline=True)
+            embed.add_field(name="Total arrests", value=str(len(records)), inline=True)
+            embed.set_footer(text="You have the right to appeal this arrest to High Rank. • SCRS")
+            title_done = "Arrest posted"
+        else:  # cite
+            records = store["citations"].setdefault(str(self.suspect.id), [])
+            records.append(
+                {
+                    "by": self.officer.id,
+                    "reason": "; ".join(PENAL_BY_CODE[c]["title"] for c in self.selected),
+                    "penal_code": ", ".join(self.selected),
+                    "charges": list(self.selected),
+                    "amount": fine,
+                    "top_class": top,
+                    "notes": self.notes or "",
+                    "at": now,
+                }
+            )
+            store["citations"][str(self.suspect.id)] = records
+            save_store(store)
+
+            embed = base_embed("🎫 Citation Issued", COLOUR_STAFF)
+            embed.add_field(name="Suspect", value=f"{self.suspect.mention} ({self.suspect.display_name})", inline=False)
+            embed.add_field(name="Charges", value=charge_lines(self.selected), inline=False)
+            embed.add_field(name="⚖️ Classification", value=f"Highest severity: **{top}**", inline=False)
+            embed.add_field(name="Total fine", value=f"${fine:,}", inline=True)
+            if self.notes:
+                embed.add_field(name="Officer notes", value=self.notes, inline=False)
+            embed.add_field(name="Issued by", value=self.officer.mention, inline=True)
+            embed.add_field(name="Total citations", value=str(len(records)), inline=True)
+            embed.set_footer(text="Pay or appeal this citation per server rules. • SCRS")
+            title_done = "Citation posted"
+
+        await interaction.response.edit_message(content=f"✅ {title_done}.", embed=None, view=None)
+        if interaction.channel:
+            await interaction.channel.send(embed=embed)
+        if interaction.guild:
+            await log_punishment(interaction.guild, embed)
+        await safe_dm(self.suspect, embed)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", emoji="✖️", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._guard(interaction):
+            return
+        await interaction.response.edit_message(content="Cancelled — nothing was issued.", embed=None, view=None)
+        self.stop()
+
+
+@bot.tree.command(name="arrest", description="Arrest a suspect: pick charges from the penal code (up to 15 at once)")
+@leo_only()
+@app_commands.describe(
+    suspect="The suspect being arrested",
+    jail_time="Jail time in minutes (leave blank to use the penal code's suggested total)",
+    notes="Optional officer notes",
+)
+async def arrest(
+    interaction: discord.Interaction,
+    suspect: discord.Member,
+    jail_time: app_commands.Range[int, 0, 600] | None = None,
+    notes: str | None = None,
+) -> None:
+    view = ChargeSelectView(
+        kind="arrest", officer=interaction.user, suspect=suspect, jail_time=jail_time, notes=notes
+    )
+    await interaction.response.send_message(
+        embed=base_embed(
+            f"🚔 Arrest — {suspect.display_name}",
+            COLOUR_ALERT,
+            "Pick the charges from the penal code below (you can select up to 15), then press **Confirm**.",
+        ),
+        view=view,
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="cite", description="Cite a suspect: pick charges from the penal code (up to 15 at once)")
+@leo_only()
+@app_commands.describe(suspect="The person being cited", notes="Optional officer notes")
+async def cite(
+    interaction: discord.Interaction,
+    suspect: discord.Member,
+    notes: str | None = None,
+) -> None:
+    view = ChargeSelectView(kind="cite", officer=interaction.user, suspect=suspect, notes=notes)
+    await interaction.response.send_message(
+        embed=base_embed(
+            f"🎫 Citation — {suspect.display_name}",
+            COLOUR_STAFF,
+            "Pick the charges from the penal code below (you can select up to 15), then press **Confirm**.",
+        ),
+        view=view,
+        ephemeral=True,
+    )
 
 
 async def _purge_bot_session_messages(channel: discord.TextChannel, keep_first_overall: bool = False) -> int:
