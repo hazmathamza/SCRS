@@ -2392,18 +2392,67 @@ class UtteranceSink(voice_recv.sinks.AudioSink if VOICE_RECV_AVAILABLE else obje
         self.buffers.clear()
 
 
+def _speakable(text: str) -> str:
+    """Make text pronounce the way a dispatcher would say it.
+
+    Orpheus reads "911" as "nine eleven" (like the year) — spell it out so
+    it comes out "nine one one". Applied to everything the bot speaks."""
+    return re.sub(r"\b911\b", "nine one one", text)
+
+
+def _merge_wavs(parts: list[bytes]) -> bytes | None:
+    """Concatenate same-format WAV byte strings into one WAV, or None if
+    the parts' formats differ (caller then plays them back-to-back)."""
+    try:
+        params = None
+        frames = []
+        for part in parts:
+            with wave.open(io.BytesIO(part), "rb") as w:
+                if params is None:
+                    params = w.getparams()
+                elif (w.getnchannels(), w.getsampwidth(), w.getframerate()) != (
+                    params.nchannels,
+                    params.sampwidth,
+                    params.framerate,
+                ):
+                    return None
+                frames.append(w.readframes(w.getnframes()))
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setnchannels(params.nchannels)
+            w.setsampwidth(params.sampwidth)
+            w.setframerate(params.framerate)
+            for f in frames:
+                w.writeframes(f)
+        return out.getvalue()
+    except Exception:
+        return None
+
+
 async def _speak(session: dict, text: str) -> None:
-    """Speak text in the session's voice channel (TTS), text fallback in chat."""
+    """Speak text in the session's voice channel (TTS), text fallback in chat.
+
+    All chunks are synthesized BEFORE anything plays, then merged into a
+    single WAV so playback has no dead-air gaps (the previous flow made a
+    TTS API call between chunks, which sounded choppy)."""
     vc = session["vc"]
     async with session["speak_lock"]:
-        for chunk in _chunk_text(text):
+        chunks = _chunk_text(_speakable(text))
+        parts: list[bytes] = []
+        for chunk in chunks:
             wav_bytes = await groq_speak_wav(chunk)
-            if not wav_bytes:
+            if wav_bytes:
+                parts.append(wav_bytes)
+            else:
                 try:
                     await session["text_channel"].send(f"🔊 {chunk}")
                 except Exception:
                     pass
-                continue
+        if not parts:
+            return
+        merged = _merge_wavs(parts) if len(parts) > 1 else parts[0]
+        playlist = [merged] if merged else parts
+        for wav_bytes in playlist:
             path = None
             try:
                 import tempfile
