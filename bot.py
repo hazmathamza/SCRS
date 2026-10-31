@@ -612,12 +612,37 @@ async def sysinfo(interaction: discord.Interaction) -> None:
         nacl_ok = False
 
     voice_ready = bool(ffmpeg_path) and opus_loaded and nacl_ok
+
+    # Groq reachability from THIS host (Groq's edge blocks some datacenter
+    # IPs with a 403 — that's what this line diagnoses)
+    if not GROQ_API_KEY:
+        groq_status = "⚠️ GROQ_API_KEY not set"
+    elif aiohttp is None:
+        groq_status = "⚠️ aiohttp missing"
+    else:
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.get(
+                    f"{GROQ_BASE}/models",
+                    headers=_groq_headers(),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    groq_status = (
+                        f"✅ reachable (HTTP {resp.status}) via `{GROQ_BASE}`"
+                        if resp.status == 200
+                        else f"❌ HTTP {resp.status} via `{GROQ_BASE}`"
+                        + (" — edge IP block; use the relay (GROQ_BASE_URL)" if resp.status == 403 else "")
+                    )
+        except Exception as exc:
+            groq_status = f"❌ request failed: {exc}"
+
     embed = base_embed("🖥️ System Info — SCRS Bot Host", COLOUR_INFO)
     embed.add_field(name="Python", value=platform.python_version(), inline=True)
     embed.add_field(name="discord.py", value=discord.__version__, inline=True)
     embed.add_field(name="FFmpeg", value=ffmpeg_path or "❌ NOT FOUND", inline=True)
     embed.add_field(name="libopus", value=("✅ " if opus_loaded else "❌ ") + opus_detail, inline=True)
     embed.add_field(name="PyNaCl (voice)", value="✅ installed" if nacl_ok else "❌ missing", inline=True)
+    embed.add_field(name="Groq API (chat / voice AI)", value=groq_status, inline=False)
     embed.add_field(
         name="Voice dispatch ready?",
         value="✅ YES — FFmpeg + opus + PyNaCl all present" if voice_ready else "❌ NO — see missing items above",
@@ -2087,7 +2112,14 @@ except Exception:
     VOICE_RECV_AVAILABLE = False
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_BASE = "https://api.groq.com/openai/v1"
+# Groq's edge blocks requests from some datacenter IP ranges (Katabump's
+# included) with 403 "Access denied. Please check your network settings." —
+# the block happens before auth, so the key is fine. Workaround: relay the
+# calls through a tiny Cloudflare Worker (see groq-relay-worker.js) and set
+# GROQ_BASE_URL to https://<your-worker>.workers.dev/openai/v1 — plus
+# GROQ_RELAY_KEY to the shared secret the worker checks.
+GROQ_BASE = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+GROQ_RELAY_KEY = os.getenv("GROQ_RELAY_KEY", "")
 GROQ_LLM_MODEL = os.getenv("GROQ_LLM_MODEL", "openai/gpt-oss-120b")
 GROQ_STT_MODEL = os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo")
 GROQ_TTS_MODEL = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english")
@@ -2099,7 +2131,10 @@ CANCEL_WORDS = {"cancel", "no", "stop", "never mind", "nevermind", "abort", "for
 
 
 def _groq_headers() -> dict:
-    return {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    if GROQ_RELAY_KEY:
+        headers["X-Relay-Key"] = GROQ_RELAY_KEY
+    return headers
 
 
 async def groq_transcribe(wav_bytes: bytes) -> str:
