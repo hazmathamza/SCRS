@@ -2428,6 +2428,8 @@ async def _speak(session: dict, text: str) -> None:
 
 async def _apply_voice_action(session: dict, action: dict) -> str:
     """Execute a confirmed voice action. Returns a short spoken result."""
+    src = str(session.get("source", "voice"))  # "voice" or "chat"
+    Src = src.capitalize()
     guild: discord.Guild = session["guild"]
     actor: discord.Member = action["speaker"]
     name = action["name"]
@@ -2435,7 +2437,7 @@ async def _apply_voice_action(session: dict, action: dict) -> str:
 
     if name == "say_message":
         await session["text_channel"].send(str(args.get("message", ""))[:2000])
-        await voice_log(guild, f"Voice /say by {actor}: {str(args.get('message', ''))[:150]}")
+        await voice_log(guild, f"{Src} /say by {actor}: {str(args.get('message', ''))[:150]}")
         return "Message sent."
 
     target = action.get("member_obj")
@@ -2450,26 +2452,26 @@ async def _apply_voice_action(session: dict, action: dict) -> str:
         if role:
             try:
                 if role not in target.roles:
-                    await target.add_roles(role, reason=f"Infraction {level} via voice by {actor}")
+                    await target.add_roles(role, reason=f"Infraction {level} via {src} by {actor}")
                 role_note = f"Added role: **Infraction {level}**"
             except discord.Forbidden:
                 role_note = "⚠️ Couldn't add the Infraction role (bot role too low)."
         records.append(
-            {"by": actor.id, "reason": args.get("reason", ""), "proof": "Voice command", "level": level, "at": datetime.now(timezone.utc).isoformat()}
+            {"by": actor.id, "reason": args.get("reason", ""), "proof": f"{Src} command", "level": level, "at": datetime.now(timezone.utc).isoformat()}
         )
         store["infractions"][str(target.id)] = records
         save_store(store)
-        embed = base_embed("⚠️ Infraction Issued (voice command)", COLOUR_ALERT)
+        embed = base_embed(f"⚠️ Infraction Issued ({src} command)", COLOUR_ALERT)
         embed.add_field(name="Player", value=f"{target.mention} ({target.display_name})", inline=False)
         embed.add_field(name="Infraction", value=f"Infraction {level} of 3", inline=True)
-        embed.add_field(name="Issued by", value=f"{actor.mention} (voice)", inline=True)
+        embed.add_field(name="Issued by", value=f"{actor.mention} ({src})", inline=True)
         embed.add_field(name="Reason", value=args.get("reason", ""), inline=False)
         if role_note:
             embed.add_field(name="Role", value=role_note, inline=False)
         await session["text_channel"].send(embed=embed)
         await log_punishment(guild, embed)
         await safe_dm(target, embed)
-        await voice_log(guild, f"Voice infraction {level} -> {target} by {actor}: {args.get('reason', '')}")
+        await voice_log(guild, f"{Src} infraction {level} -> {target} by {actor}: {args.get('reason', '')}")
         return f"Done. Infraction {level} given to {target.display_name}."
 
     if name == "give_strike":
@@ -2483,23 +2485,23 @@ async def _apply_voice_action(session: dict, action: dict) -> str:
                     if old_role and old_role in target.roles and old_role != new_role:
                         await target.remove_roles(old_role, reason="Superseded by higher strike")
                 if new_role not in target.roles:
-                    await target.add_roles(new_role, reason=f"Staff Strike {level} via voice by {actor}")
+                    await target.add_roles(new_role, reason=f"Staff Strike {level} via {src} by {actor}")
             except discord.Forbidden:
                 pass
         records.append(
-            {"by": actor.id, "reason": args.get("reason", ""), "proof": "Voice command", "level": level, "at": datetime.now(timezone.utc).isoformat()}
+            {"by": actor.id, "reason": args.get("reason", ""), "proof": f"{Src} command", "level": level, "at": datetime.now(timezone.utc).isoformat()}
         )
         store["strikes"][str(target.id)] = records
         save_store(store)
-        embed = base_embed("🔨 Staff Strike Issued (voice command)", COLOUR_ALERT)
+        embed = base_embed(f"🔨 Staff Strike Issued ({src} command)", COLOUR_ALERT)
         embed.add_field(name="Staff Member", value=f"{target.mention} ({target.display_name})", inline=False)
         embed.add_field(name="Strike", value=f"Staff Strike {level} of 3", inline=True)
-        embed.add_field(name="Issued by", value=f"{actor.mention} (voice)", inline=True)
+        embed.add_field(name="Issued by", value=f"{actor.mention} ({src})", inline=True)
         embed.add_field(name="Reason", value=args.get("reason", ""), inline=False)
         await session["text_channel"].send(embed=embed)
         await log_punishment(guild, embed)
         await safe_dm(target, embed)
-        await voice_log(guild, f"Voice strike {level} -> {target} by {actor}: {args.get('reason', '')}")
+        await voice_log(guild, f"{Src} strike {level} -> {target} by {actor}: {args.get('reason', '')}")
         return f"Done. Strike {level} given to {target.display_name}."
 
     if name == "issue_ticket":
@@ -2510,16 +2512,16 @@ async def _apply_voice_action(session: dict, action: dict) -> str:
         )
         store["citations"][str(target.id)] = records
         save_store(store)
-        embed = base_embed("🎫 Ticket Issued (voice command)", COLOUR_STAFF)
+        embed = base_embed(f"🎫 Ticket Issued ({src} command)", COLOUR_STAFF)
         embed.add_field(name="User", value=f"{target.mention} ({target.display_name})", inline=False)
         embed.add_field(name="Reason", value=args.get("reason", ""), inline=False)
         embed.add_field(name="Penal Code", value=str(args.get("penal_code", "N/A")), inline=True)
         embed.add_field(name="Amount", value=f"${amount:,}", inline=True)
-        embed.add_field(name="Issued by", value=f"{actor.mention} (voice)", inline=True)
+        embed.add_field(name="Issued by", value=f"{actor.mention} ({src})", inline=True)
         await session["text_channel"].send(embed=embed)
         await log_punishment(guild, embed)
         await safe_dm(target, embed)
-        await voice_log(guild, f"Voice ticket ${amount} -> {target} by {actor}: {args.get('reason', '')}")
+        await voice_log(guild, f"{Src} ticket ${amount} -> {target} by {actor}: {args.get('reason', '')}")
         return f"Done. Citation of {amount} dollars issued to {target.display_name}."
 
     if name == "issue_warrant":
@@ -2527,18 +2529,18 @@ async def _apply_voice_action(session: dict, action: dict) -> str:
         records.append({"by": actor.id, "reason": args.get("reason", ""), "at": datetime.now(timezone.utc).isoformat(), "active": True})
         store["warrants"][str(target.id)] = records
         save_store(store)
-        embed = base_embed("📜 Warrant Issued (voice command)", COLOUR_ALERT)
+        embed = base_embed(f"📜 Warrant Issued ({src} command)", COLOUR_ALERT)
         embed.add_field(name="User", value=f"{target.mention} ({target.display_name})", inline=False)
         embed.add_field(name="Reason", value=args.get("reason", ""), inline=False)
-        embed.add_field(name="Issued by", value=f"{actor.mention} (voice)", inline=True)
+        embed.add_field(name="Issued by", value=f"{actor.mention} ({src})", inline=True)
         embed.add_field(name="Status", value="🔴 ACTIVE", inline=False)
         await session["text_channel"].send(embed=embed)
         await log_punishment(guild, embed)
         await safe_dm(target, embed)
-        await voice_log(guild, f"Voice warrant -> {target} by {actor}: {args.get('reason', '')}")
+        await voice_log(guild, f"{Src} warrant -> {target} by {actor}: {args.get('reason', '')}")
         return f"Done. Warrant issued for {target.display_name}."
 
-    return "That action isn't supported by voice yet."
+    return f"That action isn't supported by {src} yet."
 
 
 def _summarize_action(action: dict) -> str:
@@ -2745,7 +2747,10 @@ ASSISTANT_SYSTEM = (
     "Misdemeanor 2nd/1st, Felony 3rd/2nd/1st, up to Capital; fines are in dollars and jail time is in "
     "SECONDS (charges stack, total jail caps at 900 seconds, and the most serious charge leads the booking). "
     "If CHARGE DATA is provided with the conversation, treat it as the authority for penal-code questions. "
-    "Never invent penal codes, fines, jail times, or server rules you were not given — if you don't know, say so."
+    "Never invent penal codes, fines, jail times, or server rules you were not given — if you don't know, say so. "
+    "You cannot perform moderation actions (infractions, strikes, tickets, warrants) yourself: when a staff "
+    "member asks for one, the system offers it separately with Confirm/Cancel buttons. Never claim you "
+    "performed an action."
 )
 _assistant_history: dict[int, collections.deque] = {}
 _assistant_cooldown: dict[int, float] = {}
@@ -2827,6 +2832,87 @@ async def on_message(message: discord.Message) -> None:
         await bot.process_commands(message)
 
 
+class ActionConfirmView(discord.ui.View):
+    """Confirm/Cancel buttons for an action the chat assistant parsed.
+
+    Same safety model as the voice assistant: the action is executed ONLY
+    when the requesting staff member presses Confirm."""
+
+    def __init__(self, *, requester: discord.Member, session: dict, action: dict) -> None:
+        super().__init__(timeout=60)
+        self.requester = requester
+        self.session = session
+        self.action = action
+        self.message: discord.Message | None = None
+
+    async def _guard(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester.id:
+            await interaction.response.send_message("Only the person who requested this action can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm", emoji="✅", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._guard(interaction):
+            return
+        for item in self.children:
+            item.disabled = True  # type: ignore[attr-defined]
+        await interaction.response.edit_message(content="⏳ Working on it…", view=self)
+        result = await _apply_voice_action(self.session, self.action)
+        await interaction.edit_original_response(content=f"✅ {result}", view=None)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", emoji="✖️", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._guard(interaction):
+            return
+        await interaction.response.edit_message(content="❌ Cancelled — nothing was done.", view=None)
+        await voice_log(self.session["guild"], f"Chat action cancelled by {self.requester}: {_summarize_action(self.action)}")
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        if self.message:
+            try:
+                await self.message.edit(content="⌛ Timed out — nothing was done.", view=None)
+            except Exception:
+                pass
+
+
+async def _assistant_offer_action(message: discord.Message, action: dict) -> bool:
+    """Offer a parsed action in the assistant channel. Returns True when the
+    message was handled as an action (offered, executed, or explained)."""
+    guild = message.guild
+    author = message.author
+    session = {"guild": guild, "text_channel": message.channel, "source": "chat"}
+    action["speaker"] = author
+
+    if action["name"] == "say_message":
+        result = await _apply_voice_action(session, action)
+        await message.channel.send(f"✅ {result}")
+        return True
+
+    query = str(action["arguments"].get("member", ""))
+    target, ambiguous = resolve_member(guild, query)
+    if ambiguous:
+        await message.channel.send(
+            f"🤔 A few members match **{query}**: {', '.join(ambiguous)} — run it again with the exact name."
+        )
+        return True
+    if target is None:
+        await message.channel.send(f"🤔 I couldn't find a member called **{query}** — check the name and try again.")
+        return True
+    action["member_obj"] = target
+
+    summary = _summarize_action(action)
+    view = ActionConfirmView(requester=author, session=session, action=action)
+    view.message = await message.channel.send(
+        f"🛠️ **{author.display_name}** — ready to execute:\n**{summary}**\nPress ✅ Confirm within 60 seconds to do it.",
+        view=view,
+    )
+    await voice_log(guild, f"Chat action offered to {author}: {summary}")
+    return True
+
+
 async def _assistant_handle(message: discord.Message) -> None:
     global _assistant_warned_at
     content = message.content.strip()
@@ -2841,6 +2927,17 @@ async def _assistant_handle(message: discord.Message) -> None:
     if now - _assistant_cooldown.get(message.author.id, 0) < 4:
         return
     _assistant_cooldown[message.author.id] = now
+
+    # Action path: High Rank / admin authors can also give the assistant
+    # commands (same gate, tool parser, and executor as the voice assistant).
+    # Anything that isn't a clear command falls through to normal chat.
+    if isinstance(message.author, discord.Member) and passes(message.author, HIGH_RANK_ROLES):
+        action = await groq_parse_command(content)
+        if action is not None and await _assistant_offer_action(message, action):
+            hist = _assistant_history.setdefault(message.channel.id, collections.deque(maxlen=14))
+            hist.append({"role": "user", "content": f"{message.author.display_name}: {content}"})
+            hist.append({"role": "assistant", "content": f"[Offered action: {_summarize_action(action)}]"})
+            return
 
     history = _assistant_history.setdefault(message.channel.id, collections.deque(maxlen=14))
     context = _penal_context(content)
