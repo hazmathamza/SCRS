@@ -4,6 +4,8 @@ Custom Discord bot for the **Sunshine Coast Roleplay Server (SCRS)** — a Roblo
 
 **v2:** every command is a **slash (/) command**. Commands are synced to the SCRS guild on startup, so they appear in Discord's `/` picker as soon as you type `/`. Usage is gated by the server's real roles (**High Rank**, **Staff Team**, **Civilian**); Administrators bypass the gates so admins can always test.
 
+> **📖 Setting this bot up (or rebuilding it) from zero? Read [SETUP.md](SETUP.md)** — a beginner-friendly, click-by-click guide covering the Discord app, Katabump hosting, the Groq AI key, the Cloudflare relay, first-run checks, and every common error decoded.
+
 ## Commands
 
 | Command | Role needed | What it does |
